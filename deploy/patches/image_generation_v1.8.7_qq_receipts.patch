@@ -1,0 +1,218 @@
+diff --git a/main.py b/main.py
+index 2095767..a3e39ce 100644
+--- a/main.py
++++ b/main.py
+@@ -14,6 +14,7 @@ from astrbot.api.star import Context, Star
+ from astrbot.core.config.astrbot_config import AstrBotConfig
+ from astrbot.core.star.star_tools import StarTools
+ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
++from data.plugins.astrbot_plugin_dsh_companion.qq_images import QQImageDelivery, qq_target
+ 
+ from .core.adapters.generator import ImageGenerator
+ from .core.api.public import ImageGenerationPublicAPI
+@@ -110,6 +111,9 @@ class ImageGenerationPlugin(CommandHandlerMixin, Star):
+             max_queued_generation_tasks=self.config_manager.max_queued_generation_tasks,
+             persistence_file=self.data_dir / "generation_tasks.json",
+         )
++        self.qq_image_delivery = QQImageDelivery(
++            self.context, self.task_manager, self.persisted_image_dir, self.image_temp_dir
++        )
+ 
+         # Initialize LLM tool result handling.
+         self.llm_result_handler = LLMResultHandler(
+@@ -163,6 +167,8 @@ class ImageGenerationPlugin(CommandHandlerMixin, Star):
+             logger.error(f"{LOG} 适配器配置加载失败，插件未初始化")
+ 
+         self.task_manager.load_generation_history(self.usage_manager)
++        for record in self.task_manager.list_generation_tasks(limit=None):
++            self.qq_image_delivery.cleanup_confirmed(record)
+         self.task_manager.create_task(
+             self.generation_executor.retry_quota_settlements(),
+             name="image_generation_quota_retry",
+@@ -424,6 +430,7 @@ class ImageGenerationPlugin(CommandHandlerMixin, Star):
+             )
+         if sender_id:
+             caller_type = "user"
++        target = qq_target(source_event) if source_event and auto_send else None
+         quota_date, quota_scopes, quota_exempt = self.usage_manager.reserve_task(
+             task_id,
+             unified_msg_origin,
+@@ -444,7 +451,7 @@ class ImageGenerationPlugin(CommandHandlerMixin, Star):
+                 image_count=image_count,
+                 task_id=task_id,
+                 is_usage_limit_admin=is_usage_limit_admin,
+-                deliver_via_ai=source == "LLM工具",
++                deliver_via_ai=source == "LLM工具" or target is not None,
+                 auto_send=auto_send,
+                 gif_requested=gif_requested,
+             )
+@@ -488,7 +495,11 @@ class ImageGenerationPlugin(CommandHandlerMixin, Star):
+             unified_msg_origin,
+             is_admin=is_usage_limit_admin,
+         )
+-        if source == "LLM工具":
++        if target is not None:
++            self.task_manager.add_generation_task_done_callback(
++                record.task_id, lambda completed: self.qq_image_delivery.deliver(completed, target)
++            )
++        elif source == "LLM工具":
+             try:
+                 self.llm_result_handler.attach_task_wakeup(
+                     record, source_event=source_event
+diff --git a/core/llm/result_handler.py b/core/llm/result_handler.py
+index 14c94e3..299d6ae 100644
+--- a/core/llm/result_handler.py
++++ b/core/llm/result_handler.py
+@@ -112,6 +112,7 @@ class LLMResultHandler:
+         resolution: str,
+         image_count: int,
+         task_id: str,
++        direct_qq: bool = False,
+     ) -> str:
+         """Format the successful LLM tool result for the agent."""
+         model = ""
+@@ -152,7 +153,11 @@ class LLMResultHandler:
+                 "",
+                 "内部指引:",
+                 "- 当前仅表示任务已提交，图片尚未完成，不要向用户声明已完成。",
+-                "- 结果就绪后会唤醒你并提供图片路径，届时由你判断是否需要发送给用户。",
++                (
++                    "- 图片通过审核后由插件自动发回原 QQ 会话。收到发送回执前不要说已发。"
++                    if direct_qq else
++                    "- 结果就绪后会唤醒你并提供图片路径，届时由你判断是否需要发送给用户。"
++                ),
+                 "- 不要重复调用 generate_image。",
+             ]
+         )
+diff --git a/core/llm/tools.py b/core/llm/tools.py
+index 6cbbe86..79bf47f 100644
+--- a/core/llm/tools.py
++++ b/core/llm/tools.py
+@@ -12,6 +12,7 @@ from astrbot.api import logger
+ from astrbot.core.agent.run_context import ContextWrapper
+ from astrbot.core.agent.tool import FunctionTool, ToolExecResult
+ from astrbot.core.astr_agent_context import AstrAgentContext
++from data.plugins.astrbot_plugin_dsh_companion.qq_images import qq_target
+ from pydantic import Field
+ from pydantic.dataclasses import dataclass as pydantic_dataclass
+ 
+@@ -219,6 +220,7 @@ async def _start_generation_task(
+         resolution=resolution,
+         image_count=image_count,
+         task_id=task_id,
++        direct_qq=qq_target(event) is not None,
+     )
+ 
+ 
+diff --git a/core/tasks/manager.py b/core/tasks/manager.py
+index 6445577..3fe71d5 100644
+--- a/core/tasks/manager.py
++++ b/core/tasks/manager.py
+@@ -660,6 +660,28 @@ class TaskManager(
+         self._save_generation_tasks()
+         return record
+ 
++    def record_qq_image_receipt(self, task_id: str, path: str, message_id: int) -> None:
++        """Commit a OneBot receipt before its file can be removed."""
++        record = self._generation_tasks[task_id]
++        if not self._enable_generation_task_history:
++            raise OSError("QQ image delivery requires persistent task history")
++        if path not in record.result_paths or record.status != GenerationTaskStatus.SUCCEEDED:
++            raise ValueError("Invalid QQ image result")
++        receipt_paths = {**record.qq_image_receipts, path: message_id}
++        delivered_paths = list(dict.fromkeys([*record.delivered_paths, path]))
++        delivered = set(record.result_paths) <= set(delivered_paths)
++        snapshot = replace(
++            record, qq_image_receipts=receipt_paths, delivered_paths=delivered_paths,
++            delivered=delivered, delivered_at=(record.delivered_at or datetime.now()) if delivered else None,
++        )
++        self._generation_store.save([
++            snapshot if r is record else r for r in self._generation_tasks.values()
++        ])
++        record.qq_image_receipts = snapshot.qq_image_receipts
++        record.delivered_paths = snapshot.delivered_paths
++        record.delivered = snapshot.delivered
++        record.delivered_at = snapshot.delivered_at
++
+     def mark_generation_task_succeeded(
+         self,
+         task_id: str,
+@@ -764,7 +786,7 @@ class TaskManager(
+         *,
+         unified_msg_origin: str | None = None,
+         include_finished: bool = True,
+-        limit: int = 10,
++        limit: int | None = 10,
+     ) -> list[GenerationTaskRecord]:
+         """List tracked generation tasks from newest to oldest."""
+         tasks = list(reversed(self._generation_tasks.values()))
+@@ -772,7 +794,7 @@ class TaskManager(
+             tasks = [t for t in tasks if t.unified_msg_origin == unified_msg_origin]
+         if not include_finished:
+             tasks = [t for t in tasks if t.is_active]
+-        return tasks[: max(1, limit)]
++        return tasks if limit is None else tasks[: max(1, limit)]
+ 
+     def cancel_generation_task(
+         self,
+@@ -816,7 +838,16 @@ class TaskManager(
+         )
+ 
+     def _must_keep_quota_record(self, record: GenerationTaskRecord) -> bool:
+-        return record.is_active or self._needs_quota_recovery(record)
++        return (
++            record.is_active or self._needs_quota_recovery(record)
++            or (
++                record.status == GenerationTaskStatus.SUCCEEDED
++                and record.source in {"LLM工具", "指令"}
++                and record.sender_id
++                and not record.delivered
++                and any(p not in record.delivered_paths and Path(p).is_file() for p in record.result_paths)
++            )
++        )
+ 
+     def _trim_generation_history(self) -> bool:
+         """Keep finished task history bounded while preserving active tasks."""
+diff --git a/core/tasks/models.py b/core/tasks/models.py
+index 372ea62..fa323ce 100644
+--- a/core/tasks/models.py
++++ b/core/tasks/models.py
+@@ -118,6 +118,7 @@ class GenerationTaskRecord:
+     delivered: bool = False
+     delivered_at: datetime | None = None
+     delivered_paths: list[str] = field(default_factory=list)
++    qq_image_receipts: dict[str, int] = field(default_factory=dict)
+     current_index: int = 0
+     retry_attempt: int = 0
+     max_retry_attempts: int = 0
+diff --git a/core/tasks/store.py b/core/tasks/store.py
+index 8b4c703..5df58ba 100644
+--- a/core/tasks/store.py
++++ b/core/tasks/store.py
+@@ -145,6 +145,7 @@ class GenerationTaskStore:
+             "delivered": record.delivered,
+             "delivered_at": self._datetime_to_str(record.delivered_at),
+             "delivered_paths": list(record.delivered_paths),
++            "qq_image_receipts": dict(record.qq_image_receipts),
+             "current_index": record.current_index,
+             "retry_attempt": record.retry_attempt,
+             "max_retry_attempts": record.max_retry_attempts,
+@@ -205,6 +206,7 @@ class GenerationTaskStore:
+         except ValueError:
+             status = GenerationTaskStatus.FAILED
+ 
++        receipts = raw_record.get("qq_image_receipts")
+         return GenerationTaskRecord(
+             task_id=task_id,
+             source=str(raw_record.get("source") or "历史记录"),
+@@ -242,6 +244,10 @@ class GenerationTaskStore:
+             delivered=bool(raw_record.get("delivered", False)),
+             delivered_at=self._str_to_datetime(raw_record.get("delivered_at")),
+             delivered_paths=self._safe_str_list(raw_record.get("delivered_paths")),
++            qq_image_receipts={
++                path: receipt for path, receipt in receipts.items()
++                if type(receipt) is int and receipt
++            } if isinstance(receipts, dict) else {},
+             current_index=self._safe_int(raw_record.get("current_index"), 0, 0),
+             retry_attempt=self._safe_int(raw_record.get("retry_attempt"), 0, 0),
+             max_retry_attempts=self._safe_int(

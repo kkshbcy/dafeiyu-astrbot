@@ -30,4 +30,17 @@ SiliconFlow / MiniMax / MiMo 音色。插件的自动语音开关保持关闭，
 [`proactive_chat/README.md`](proactive_chat/README.md)。
 
 来源：AstrBot（AGPL-3.0）https://github.com/AstrBotDevs/AstrBot
+
+## QQ 生图回执补丁
+
+`image_generation_v1.8.7_qq_receipts.patch` 应用于已安装的「通用生图」v1.8.7 插件根目录。
+先部署本仓库的 `astrbot_plugin_dsh_companion`，再对「通用生图」执行
+`patch --batch --fuzz=0 --dry-run -d "$IMAGE_PLUGIN_DIR" -p1 < image_generation_v1.8.7_qq_receipts.patch`。
+检查通过后去掉 `--dry-run` 应用，再重启 AstrBot。
+
+生图任务历史和图片持久化需开启，持久化图片数量上限设为 `0`。收到 NapCat
+的消息 ID 并将回执写入任务历史后，插件会删除已发送的原图和它的投递临时文件。
+未收到回执时，原图留在服务器上。在同一个 QQ 私聊或群聊问「出来了吗」可以查最新任务，
+发 `/补发生图` 可以补发自己最近一单未发送完的图片。
+请求超时可能发生在 QQ 已接收图片之后，遇到这种情况先查看聊天记录再决定是否补发。
 本目录仅包含修改后的文件，按 AGPL-3.0 随本项目一同分发。

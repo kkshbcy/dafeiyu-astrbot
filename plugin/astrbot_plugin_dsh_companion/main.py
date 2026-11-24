@@ -11,6 +11,7 @@ from astrbot.core.provider.provider import Provider
 from astrbot.core.provider.register import register_provider_adapter, provider_cls_map, provider_registry
 from .contract import allowed_tools, check_proposal, conversation_key, owner_private, pack_messages
 from .library import Library
+from .qq_images import is_image_followup
 
 
 TYPE = "dsh_companion_acp"
@@ -44,6 +45,12 @@ class Harness(Provider):
     async def text_chat(self, prompt=None, session_id=None, image_urls=None, audio_urls=None,
                         func_tool=None, contexts=None, system_prompt=None, tool_calls_result=None,
                         model=None, extra_user_content_parts=None, **kwargs):
+        ticket = None if self.provider_config.get("auxiliary") else tickets.get(session_id)
+        scope, owner, message_id, fallback_cid, submitted, image_followup, image_status = (
+            ticket or ("", False, "", None, set(), False, None)
+        )
+        if image_status:
+            return LLMResponse(role="assistant", completion_text=image_status)
         messages = list(contexts or [])
         if system_prompt:
             messages.insert(0, {"role":"system", "content":system_prompt})
@@ -56,11 +63,11 @@ class Harness(Provider):
             for result in results:
                 messages.extend(result.to_openai_messages())
         packet = pack_messages(messages)
-        ticket = None if self.provider_config.get("auxiliary") else tickets.get(session_id)
         schemas = func_tool.openai_schema() if func_tool else []
-        scope, owner, message_id, fallback_cid, submitted = ticket or ("", False, "", None, set())
         packet["binding"] = conversation_key(scope, kwargs.get("conversation_id") or fallback_cid)
         packet["tools"] = allowed_tools(schemas, bool(ticket), owner)
+        if image_followup:
+            packet["tools"] = [tool for tool in packet["tools"] if tool["name"] != "generate_image"]
         packet["event"] = message_id
         payload = json.dumps(packet, ensure_ascii=False, separators=(",", ":")).encode()
         if len(payload) > 22 * 1024 * 1024:
@@ -117,6 +124,10 @@ class Companion(Star):
             return owner_private(event.unified_msg_origin, event.get_sender_id(), scopes)
         return False
 
+    def image_delivery(self):
+        star = self.context.get_registered_star("astrbot_plugin_image_generation")
+        return getattr(star.star_cls, "qq_image_delivery", None) if star and star.activated else None
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=99999)
     async def accept_once(self, event: AstrMessageEvent):
         if event.get_platform_name() not in {"aiocqhttp", "wechat_native"} or event.get_extra("dfy_admitted"):
@@ -128,9 +139,15 @@ class Companion(Star):
 
     @filter.on_llm_request(priority=-50000)
     async def bind_turn(self, event: AstrMessageEvent, req):
-        if event.get_platform_name() not in {"aiocqhttp", "wechat_native"}:
+        platform = event.get_platform_name()
+        if platform not in {"aiocqhttp", "wechat_native"}:
             return
         scope = event.unified_msg_origin
+        text = event.message_str if platform == "aiocqhttp" else ""
+        image_followup = is_image_followup(text)
+        image_status = None
+        if image_followup and (delivery := self.image_delivery()):
+            image_status = delivery.status(event, text)
         conversation = getattr(req.conversation, "cid", None)
         if not conversation:
             # Group Chat Plus submits its own history without a Conversation object.
@@ -141,10 +158,24 @@ class Companion(Star):
                 if not conversation:
                     conversation = await manager.new_conversation(scope)
         ticket = "dfy:" + uuid.uuid4().hex
-        tickets[ticket] = (scope, self.is_owner(event), str(event.message_obj.message_id or ""), conversation, set())
+        tickets[ticket] = (
+            scope, self.is_owner(event), str(event.message_obj.message_id or ""), conversation,
+            set(), image_followup, image_status,
+        )
         if len(tickets) > 2048:
             tickets.popitem(last=False)
         req.session_id = ticket
+
+    @filter.command("补发生图")
+    async def retry_image(self, event: AstrMessageEvent):
+        if event.get_platform_name() != "aiocqhttp":
+            return
+        event.stop_event()
+        delivery = self.image_delivery()
+        if delivery is None:
+            yield event.plain_result("生图暂时不可用。")
+        elif message := await delivery.retry(event):
+            yield event.plain_result(message)
 
     @filter.llm_tool(name="df_reading_progress")
     async def progress(self, event: AstrMessageEvent, title: str, note: str = ""):

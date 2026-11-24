@@ -50,7 +50,7 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
                         get_curr_conversation_id=AsyncMock(return_value="fat-cid")))
                     event=SimpleNamespace(unified_msg_origin="test:GroupMessage:room",message_obj=SimpleNamespace(
                         message_id="message",raw_message={"post_type":"message","sub_type":"normal"}),
-                        get_platform_name=lambda:"aiocqhttp",get_sender_id=lambda:"member")
+                        message_str="画云",get_platform_name=lambda:"aiocqhttp",get_sender_id=lambda:"member")
                     tools=ToolSet()
                     tools.add_tool(FunctionTool(name="generate_image",description="FAT",
                         parameters={"type":"object","properties":{"prompt":{"type":"string"}}}))
@@ -119,6 +119,7 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
                 extra={}
                 return SimpleNamespace(unified_msg_origin=origin, get_sender_id=lambda:"test-actor",
                     message_obj=SimpleNamespace(message_id="test-inbound",raw_message={"post_type":"message","sub_type":"friend"}),
+                    message_str="今天读第二章",
                     get_platform_name=lambda:"aiocqhttp",
                     get_extra=extra.get,set_extra=extra.__setitem__,stop_event=lambda:extra.update(stopped=True))
             owner=event(scope)

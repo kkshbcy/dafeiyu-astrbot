@@ -21,17 +21,18 @@ class GroupTurnsTest(unittest.IsolatedAsyncioTestCase):
         self.window = turns.ReplyWindow(clock=self.clock, draw=self.draw)
         self.slots = asyncio.Semaphore(2)
         self.provider = SimpleNamespace(text_chat=AsyncMock(
-            return_value=SimpleNamespace(completion_text="no")))
+            return_value=SimpleNamespace(completion_text='{"turn":"reaction","quote":"跑完五公里"}')))
         self.room = "group/a"
         self.event = SimpleNamespace(get_platform_id=lambda: "qq", get_group_id=lambda: self.room,
                                      get_self_id=lambda: "fish", get_sender_id=lambda: "a",
-                                     get_sender_name=lambda: "甲", unified_msg_origin="group/a")
+                                     get_sender_name=lambda: "甲", unified_msg_origin="group/a",
+                                     set_extra=Mock())
         self.history = [
             SimpleNamespace(sender=SimpleNamespace(user_id="fish", nickname="小鱼"), message_str="然后呢？"),
             SimpleNamespace(sender=SimpleNamespace(user_id="b", nickname="乙"), message_str="我们聊别的"),
         ]
 
-    async def decide(self, *, direct="", text="收到", names=("小鱼",), followups=(), other=False):
+    async def decide(self, *, direct="", text="我今天跑完五公里啦", names=("小鱼",), followups=(), other=False):
         return await turns.decide(self.window, self.event, self.history, text, followups,
                                   direct=direct, names=names, other=other, provider=self.provider,
                                   slots=self.slots, timeout=10, probability=0.4, seconds=300, limit=10)
@@ -43,7 +44,7 @@ class GroupTurnsTest(unittest.IsolatedAsyncioTestCase):
             self.window.finish(claim, sent=True)
         self.provider.text_chat.assert_not_awaited()
         self.assertEqual((await self.decide())[0], "full")
-        self.provider.text_chat.return_value.completion_text = "yes"
+        self.provider.text_chat.return_value.completion_text = '{"turn":"addressed"}'
         for direct, expected in [("", "addressed"), ("quote", "quote")]:
             reason, claim = await self.decide(direct=direct)
             self.assertEqual(reason, expected)
@@ -57,6 +58,53 @@ class GroupTurnsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reason, "ambient")
         self.window.finish(claim, sent=True)
         self.assertEqual(await self.decide(), ("miss", None))
+        self.assertEqual(self.draw.call_count, 3)
+
+    async def test_unknown_or_unsupported_topic_stays_silent_even_on_a_winning_draw(self):
+        self.draw.return_value = 0
+        for verdict in [
+            '{"turn":"silent"}',
+            '{"turn":"history","quote":"周五下午三点集合"}',
+            '{"turn":"history","quote":"昨天说的呢"}',
+            '{"turn":"reaction","quote":"不存在的分享"}',
+            '{"turn":"common"}', 'no', 'yes', '{}', '[]',
+        ]:
+            with self.subTest(verdict=verdict):
+                self.provider.text_chat.return_value.completion_text = verdict
+                self.assertEqual(await self.decide(text="昨天说的呢"), ("silent", None))
+        self.assertFalse(self.window.pending)
+        self.assertFalse(self.window.sent)
+        self.draw.assert_not_called()
+
+    async def test_pending_group_plan_needs_history_even_if_judge_suggests_common_knowledge(self):
+        for kind in ("common", "reaction"):
+            for question, topic in [("咱们群什么时候抽奖？", "抽奖"), ("团建日期敲定没？", "团建")]:
+                self.provider.text_chat.return_value.completion_text = json.dumps({"turn":kind,"quote":topic})
+                self.assertEqual(await self.decide(text=question), ("silent", None))
+        self.draw.assert_not_called()
+
+    async def test_history_quote_requires_a_statement_including_its_surrounding_words(self):
+        self.provider.text_chat.return_value.completion_text = '{"turn":"history","quote":"周三"}'
+        for message in ["有人知道这周三抽不抽奖吗？", "听说是周三，没确认", "周三？还在等通知。"]:
+            self.history[1].message_str = message
+            self.assertEqual(await self.decide(text="抽奖时间定了吗？"), ("silent", None))
+        self.draw.assert_not_called()
+        self.history[1].message_str = "奖金还没定？时间已经定了，周三抽奖。"
+        self.assertEqual((await self.decide(text="抽奖时间定了吗？"))[0], "ambient")
+
+    async def test_public_fact_stable_knowledge_and_specific_reaction_can_qualify(self):
+        self.history[1].message_str = "我确认过，周六三点在南门集合。"
+        for kind, quote, question in [
+            ("history", "周六三点在南门集合", "集合地点定了吗？"),
+            ("common", "公历闰年", "公历闰年怎么算？"),
+            ("reaction", "终于跑完五公里", "我今天终于跑完五公里了！"),
+        ]:
+            self.provider.text_chat.return_value.completion_text = json.dumps({"turn":kind,"quote":quote})
+            reason, claim = await self.decide(text=question)
+            self.assertEqual(reason, "ambient")
+            self.assertIsNotNone(claim)
+            self.window.finish(claim, sent=False)
+        self.assertEqual(self.provider.text_chat.await_count, 3)
         self.assertEqual(self.draw.call_count, 3)
 
     async def test_concurrent_last_slot_failure_release_rolling_expiry_and_groups(self):
@@ -94,13 +142,16 @@ class GroupTurnsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_judge_failure_preserves_clear_vocative_only(self):
         self.provider.text_chat.side_effect = TimeoutError()
-        self.draw.return_value = 0.9
+        self.draw.return_value = 0
         self.assertEqual((await self.decide(text="小鱼，在吗"))[0], "addressed")
-        self.assertEqual((await self.decide(text="我听说小鱼在这"))[0], "miss")
-        self.assertEqual((await self.decide(text="小鱼，在吗", other=True))[0], "miss")
+        self.assertEqual((await self.decide(text="我听说小鱼在这"))[0], "silent")
+        self.assertEqual((await self.decide(text="小鱼，在吗", other=True))[0], "silent")
         self.provider.text_chat.side_effect = None
         self.provider.text_chat.return_value.completion_text = "yes or no"
-        self.assertEqual((await self.decide(text="这个怎么回事"))[0], "miss")
+        self.assertEqual((await self.decide(text="这个怎么回事"))[0], "silent")
+        self.provider = None
+        self.assertEqual((await self.decide())[0], "silent")
+        self.draw.assert_not_called()
 
     def test_expression_changes_with_energy_route_and_room(self):
         neutral = turns.expression_hint("addressed", "daytime", "平静")

@@ -19,7 +19,7 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.ids = count(1)
         self.history = []
-        self.judge = SimpleNamespace(text_chat=AsyncMock(return_value=SimpleNamespace(completion_text="no")))
+        self.judge = SimpleNamespace(text_chat=AsyncMock(return_value=SimpleNamespace(completion_text='{"turn":"silent"}')))
         self.context = SimpleNamespace(get_config=lambda **kw: {}, get_registered_star=lambda name: None,
                                        get_provider_by_id=lambda name: self.judge, get_llm_tool_manager=lambda: None,
                                        persona_manager=SimpleNamespace(get_default_persona_v3=AsyncMock(
@@ -75,7 +75,7 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
         self.plugin._check_probability_before_processing = AsyncMock(return_value=False)
         self.plugin._check_ai_decision = AsyncMock(return_value=False)
         event = self.event(Plain("那后来呢？"))
-        self.judge.text_chat.return_value.completion_text = "yes"
+        self.judge.text_chat.return_value.completion_text = '{"turn":"addressed"}'
         results = await self.consume(event)
         self.assertEqual(len(results), 1)
         self.assertEqual(event.get_extra("dfy_qq_turn"), "addressed")
@@ -91,13 +91,13 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(await self.consume(event)), 1)
             self.assertEqual(event.get_extra("dfy_qq_turn"), kind)
         self.judge.text_chat.assert_not_awaited()
-        self.judge.text_chat.return_value.completion_text = "no"
+        self.judge.text_chat.return_value.completion_text = '{"turn":"reaction","quote":"跑完五公里"}'
         self.plugin.qq_turn_window.draw = lambda: 0.39
         for _ in range(7):
-            self.assertEqual(len(await self.consume(self.event(Plain("群里聊两句")))), 1)
-        self.assertEqual(await self.consume(self.event(Plain("群里另一个话题"))), [])
+            self.assertEqual(len(await self.consume(self.event(Plain("今天跑完五公里")))), 1)
+        self.assertEqual(await self.consume(self.event(Plain("我也跑完五公里啦"))), [])
         self.assertEqual(len(await self.consume(self.event(At(qq="11"), Plain("来看一下")))), 1)
-        other = self.event(Plain("掉线这句"), group="other")
+        other = self.event(Plain("刚跑完五公里"), group="other")
         self.assertEqual(len(await self.consume(other, sent=False)), 1)
         self.assertNotIn(("qq", "other"), self.plugin.qq_turn_window.pending)
         self.assertNotIn(("qq", "other"), self.plugin.qq_turn_window.sent)
@@ -108,6 +108,64 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
         event = self.event(At(qq="11"), Plain("回我一下"))
         self.assertEqual(len(await self.consume(event)), 1)
         self.plugin._maybe_intercept_for_wait_window.assert_not_awaited()
+
+    async def test_unknown_ambient_question_never_enters_default_or_character_reply(self):
+        self.plugin.qq_turn_window.draw = lambda: 0
+        for verdict in ['{"turn":"silent"}', '{"turn":"history","quote":"这周三抽奖"}', 'no']:
+            self.judge.text_chat.return_value.completion_text = verdict
+            event = self.event(Plain("咱们群什么时候抽奖？"))
+            event.is_at_or_wake_command = True
+            self.assertEqual(await self.consume(event), [])
+            self.assertEqual(event.get_extra("dfy_qq_turn"), "silent")
+            self.assertTrue(event.call_llm)
+        self.assertFalse(self.plugin.qq_turn_window.sent)
+        self.assertFalse(self.plugin.qq_turn_window.pending)
+        self.history.append(SimpleNamespace(sender=MessageMember(user_id="33", nickname="乙"),
+                                            message_str="听说本周五，是真的吗？"))
+        self.judge.text_chat.return_value.completion_text = '{"turn":"history","quote":"本周五"}'
+        self.assertEqual(await self.consume(self.event(Plain("抽奖时间定了吗？"))), [])
+        self.history.append(SimpleNamespace(sender=MessageMember(user_id="33", nickname="乙"),
+                                            message_str="定好了，本周六晚八点抽奖。"))
+        self.judge.text_chat.return_value.completion_text = '{"turn":"history","quote":"本周六晚八点抽奖"}'
+        result, = await self.consume(self.event(Plain("咱们群什么时候抽奖？")))
+        self.assertIn("本周六晚八点抽奖", result.prompt)
+        self.assertEqual(len(self.plugin.qq_turn_window.sent[("qq", "g")]), 1)
+
+    async def test_character_can_decline_an_eligible_ambient_turn_before_sending(self):
+        self.plugin.qq_turn_window.draw = lambda: 0
+        self.judge.text_chat.return_value.completion_text = '{"turn":"common","quote":"闰年"}'
+        event = self.event(Plain("闰年怎么算？"))
+        handler = self.plugin.on_group_message(event)
+        req = await anext(handler)
+        try:
+            await self.plugin.on_llm_request(event, req)
+            self.assertIn("[NO_REPLY]", req.system_prompt)
+            event.set_result(event.plain_result("[NO_REPLY]").set_result_content_type(gcp.ResultContentType.LLM_RESULT))
+            await self.plugin.on_decorating_result(event)
+            self.assertFalse(event.get_result() and event.get_result().chain)
+            self.assertFalse(self.plugin.qq_turn_window.pending)
+        finally:
+            await handler.aclose()
+        self.assertFalse(self.plugin.qq_turn_window.sent)
+
+    async def test_ambient_reply_does_not_answer_an_earlier_cached_question(self):
+        self.plugin.max_context_messages = -1
+        del self.plugin._process_message_content  # use the real preprocessing and cache merge
+        self.enterContext(patch.object(gcp.ContextManager, "get_history_messages_with_fallback",
+                                       new=AsyncMock(return_value=[])))
+        self.plugin.qq_turn_window.draw = lambda: 0
+        previous = "这个群什么时候抽奖？"
+        self.judge.text_chat.return_value.completion_text = '{"turn":"silent"}'
+        self.assertEqual(await self.consume(self.event(Plain(previous))), [])
+        self.judge.text_chat.return_value.completion_text = '{"turn":"reaction","quote":"跑完五公里"}'
+        follow = self.event(Plain("我第一次跑完五公里！"))
+        follow.message_obj.sender.user_id = "33"
+        result, = await self.consume(follow)
+        decision_history = json.loads(self.judge.text_chat.await_args.kwargs["prompt"])["history"]
+        self.assertTrue(any(previous in row["text"] for row in decision_history))
+        self.assertIn("跑完五公里", result.prompt)
+        self.assertNotIn(previous, result.prompt)
+        self.assertNotIn(previous, str(result.contexts))
 
     async def test_first_delivered_bubble_starts_window_and_second_counts_once(self):
         event = self.event(At(qq="11"), Plain("听着呢"))
@@ -132,7 +190,8 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
         self.plugin.qq_turn_window.draw = lambda: 0.99
         async def from_burst(**kwargs):
             body = json.loads(kwargs["prompt"])
-            return SimpleNamespace(completion_text="yes" if "你怎么想的" in body["followups"] else "no")
+            kind = "addressed" if "你怎么想的" in body["followups"] else "silent"
+            return SimpleNamespace(completion_text=json.dumps({"turn": kind}))
         self.judge.text_chat.side_effect = from_burst
         batches = await asyncio.gather(self.consume(self.event(Plain("我看完了"))),
                                        self.consume(self.event(Plain("你怎么想的"))))
@@ -166,7 +225,7 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
         self.plugin.enable_ignore_at_all = True
         self.plugin.enable_ignore_at_others = True
         self.plugin.qq_turn_window.draw = lambda: 0.99
-        self.judge.text_chat.return_value.completion_text = "no"
+        self.judge.text_chat.return_value.completion_text = '{"turn":"silent"}'
         for parts in [(At(qq="all"), At(qq="11"), Plain("看看")), (Plain("小鱼，在吗"),)]:
             self.assertEqual(len(await self.consume(self.event(*parts))), 1)
         self.judge.text_chat.assert_not_awaited()
@@ -183,8 +242,9 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_other_quote_and_at_all_are_classified_and_private_ignored(self):
         self.plugin.qq_turn_window.draw = lambda: 0.95
+        self.judge.text_chat.return_value.completion_text = '{"turn":"common","quote":"闰年"}'
         for part in [Reply(id="x", sender_id=33), At(qq="all")]:
-            event = self.event(part, Plain("这个呢"))
+            event = self.event(part, Plain("闰年怎么算？"))
             event.is_at_or_wake_command = True
             self.assertEqual(await self.consume(event), [])
             self.assertEqual(event.get_extra("dfy_qq_turn"), "miss")
@@ -238,7 +298,7 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
                 if "group_history" in json.loads(kw["prompt"]):
                     entered.set(); await release.wait()
                     return SimpleNamespace(completion_text='{"reply":"周五。"}')
-                return SimpleNamespace(completion_text="no")
+                return SimpleNamespace(completion_text='{"turn":"silent"}')
             self.judge.text_chat.side_effect = draft
             job = asyncio.create_task(collect(self.event(At(qq="555"),Plain("报名截止哪天？"))))
             await asyncio.wait_for(entered.wait(), 2)

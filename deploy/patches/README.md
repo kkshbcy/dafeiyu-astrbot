@@ -54,7 +54,7 @@ QQ 消息里只说拍照或画图时，Seedream 5.5 请求使用 1K 档的实际
 
 `group_chat_plus/` 适配 Group Chat Plus V1.2.3.hotfix.2。将 `qq_group_turns.py` 放入已安装插件的根目录，在该目录运行 `patch --batch --fuzz=0 -p1 < /path/to/group_chat_plus_v1.2.3_hotfix2.patch`，再重载这个插件。补丁也校正了该版本私聊子模块引用自带文件时的导入名，便于全新加载。
 
-配置 `qq_addressed_turns=true`，在 `qq_turn_names` 中填她的公开昵称。收话人判断使用 `decision_ai_provider_id` 指定的辅助提供商。当前组合使用 `dsh_judgment`。原生 @ 她或单独引用她时直接进入回复。其他群消息结合最近十条发言和同一人的连续补充判断收话人。判断服务超时后，明确喊她名字的消息仍可在本地识别。
+配置 `qq_addressed_turns=true`，在 `qq_turn_names` 中填她的公开昵称。原生 @ 她或单独引用她时直接进入回复。其他群消息由 `decision_ai_provider_id`（线上为 `dsh_judgment`）结合最近十条发言和同一人的连续补充判断。对方在和她说话时直接回复。普通聊天须能从群里找到答案、能用稳定常识回答，或确实有具体分享可以接话，并能指出对应原文，才参与抽签。缺少依据、只能猜、话题已收尾或判断服务不可用时安静跳过。抽中后只把本轮发言和选中的原文作为回复目标，大肥鱼仍可在发送前放弃这次插话。保持安静不占回复名额。
 
 QQ 插话概率 `qq_ambient_probability` 默认 `0.4`，窗口 `qq_reply_window_seconds` 默认 `300` 秒，上限 `qq_reply_limit` 默认 `10` 轮。这三项独立于旧版通用概率和软限流。每个群独立计数，一轮里分几条发都算一次。已经发出的回复和正在处理的回复一起用于判断还有没有插话名额。实际发出后开始计时，发送失败释放名额。达到上限时依然可以回答直接找她的人。单独热重载插件保留计数，AstrBot 进程重启后重新计数。
 

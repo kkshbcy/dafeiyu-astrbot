@@ -132,7 +132,7 @@
              if self.debug_mode:
                  logger.info("【步骤12.5】更新情绪状态")
 
-@@ -7819,25 +7885,29 @@
+@@ -7819,25 +7885,32 @@
              # 🆕 从 event extras 读取语音URL（视频/文件路径已内联到 final_message 中）
              _media_audio_urls = event.get_extra("_plugin_media_audio_urls", []) or []
 
@@ -159,6 +159,9 @@
 +            if owner_answer:
 +                reply_result = event.plain_result(owner_answer).set_result_content_type(ResultContentType.LLM_RESULT)
 +            else:
++                ambient_topic = event.get_extra("dfy_qq_ambient_topic")
++                if ambient_topic:
++                    final_message = json.dumps(ambient_topic, ensure_ascii=False)
 +                reply_result = await ReplyHandler.generate_reply(
 +                    event,
 +                    self.context,
@@ -169,7 +172,7 @@
 +                    audio_urls=_media_audio_urls,  # 🆕 传递语音/音频URL列表
 +                    include_sender_info=self.include_sender_info,
 +                    include_timestamp=self.include_timestamp,  # 🔧 v1.2.0: 补传时间戳开关，确保contexts格式与prompt一致
-+                    history_messages=history_messages,  # 🔧 修复：传递历史消息用于构建contexts
++                    history_messages=[] if ambient_topic else history_messages,
 +                    conversation_fatigue_info=conversation_fatigue_info,  # 🆕 v1.2.0: 传递疲劳信息
 +                    enable_tools_reminder=self.enable_tools_reminder,
 +                    tools_reminder_persona_filter=self.tools_reminder_persona_filter,
@@ -181,7 +184,7 @@
          except Exception as e:
              ai_error_flag = True
              logger.error(f"生成AI回复时发生未捕获异常: {e}", exc_info=True)
-@@ -8066,7 +8136,7 @@
+@@ -8066,7 +8139,7 @@
          # 🔧 使用可配置的重复消息检测参数
          # 🔧 重要：重复检测只拦截发送，不影响后续流程（概率调整、注意力记录等）
          is_duplicate_blocked = False
@@ -190,7 +193,7 @@
              # 获取或初始化该会话的回复缓存
              if chat_id not in self.recent_replies_cache:
                  self.recent_replies_cache[chat_id] = []
-@@ -8141,6 +8211,8 @@
+@@ -8141,6 +8214,8 @@
              if isinstance(reply_result, ProviderRequest):
                  event.call_llm = True
 
@@ -199,7 +202,7 @@
              yield reply_result
 
              # 🔧 安全兜底：agent完整流程结束后，检查是否有未保存的累积回复
-@@ -8217,7 +8289,7 @@
+@@ -8217,7 +8292,7 @@
                  logger.info("[主动对话] 已记录AI回复（普通回复）")
 
          # 🆕 v1.2.1: 记录回复到密度管理器
@@ -208,7 +211,7 @@
              try:
                  density_chat_key = ProbabilityManager.get_chat_key(
                      platform_name, is_private, chat_id
-@@ -9367,8 +9439,11 @@
+@@ -9367,8 +9442,11 @@
          if not should_continue:
              return
 
@@ -222,7 +225,7 @@
              # 使用完整的会话标识，确保不同会话的状态隔离
              chat_key = ProbabilityManager.get_chat_key(
                  platform_name, is_private, chat_id
-@@ -9537,11 +9612,23 @@
+@@ -9537,11 +9615,23 @@
          # 步骤2.8: 提前检测@提及信息与候选冷却上下文（轻量操作，便于概率阶段使用）
          mention_info = await self._check_mention_others(event)
 
@@ -247,7 +250,7 @@
              _gww_intercepted = await self._maybe_intercept_for_wait_window(
                  event,
                  chat_id,
-@@ -9604,7 +9691,7 @@
+@@ -9604,7 +9694,7 @@
              )
 
          # 步骤3: 概率判断（第一道核心过滤，避免后续耗时处理）
@@ -256,7 +259,7 @@
              event,
              platform_name,
              is_private,
-@@ -9791,7 +9878,7 @@
+@@ -9791,7 +9881,7 @@
          # 根据消息类型和对应的窗口行为模式，判断是否允许开启窗口
          _gww_extra_count = 0  # 🔧 等待窗口收集的额外消息数（用于注意力机制补偿）
          _gww_window_token = 0  # 🔧 窗口令牌（0=无窗口），用于决策AI不回复时精确转换
@@ -265,7 +268,7 @@
          if poke_info_for_probability is not None:
              _gww_can_open = False  # 戳一戳永远不开窗口（无论 poke_mode 如何设置）
          elif is_at_message and self.group_wait_window_at_mode in (
-@@ -9957,7 +10044,7 @@
+@@ -9957,7 +10047,7 @@
          arrival_seq, arrival_monotonic = self._ensure_arrival_metadata(event)
          early_message_id = processing_id
 
@@ -274,7 +277,7 @@
              await SmartConcurrentManager.register_arrival(
                  chat_id=chat_id,
                  processing_id=processing_id,
-@@ -9966,7 +10053,7 @@
+@@ -9966,7 +10056,7 @@
                  arrival_monotonic=arrival_monotonic,
              )
 
@@ -283,13 +286,13 @@
              try:
                  _smart_content = MessageCleaner.clean_message(message_text or "")
              except Exception:
-@@ -10090,7 +10177,31 @@
+@@ -10090,7 +10180,31 @@
          )
          _at_all_skip_all = is_at_all_message and self.at_all_message_mode == "skip_all"
 
 -        if _welcome_skip_all or _at_all_skip_all:
 +        if qq_policy:
-+            burst = event.get_extra("dfy_qq_burst_texts") or [qq_text or original_message_text]
++            burst = event.get_extra("dfy_qq_burst_texts") or [qq_text]
 +            other_addressee = bool(event.get_extra("dfy_qq_other_target"))
 +            judge = None
 +            if not direct_reason:
@@ -316,7 +319,7 @@
              should_reply = True
              if self.debug_mode:
                  if _welcome_skip_all:
-@@ -10106,7 +10217,7 @@
+@@ -10106,7 +10220,7 @@
              # 🆕 v1.2.0: 传递原始消息文本用于关键词检测
              # 🆕 Smart 模式：若当前批次已吸收后续消息，则决策AI也要基于同一批次视图判断
              decision_context = formatted_context
@@ -325,7 +328,7 @@
                  smart_batch_messages = self._smart_batch_snapshots.get(
                      early_message_id, []
                  )
-@@ -10217,7 +10328,7 @@
+@@ -10217,7 +10331,7 @@
                  logger.info("📦 决策AI判断: 不回复此消息，无待缓存数据")
 
              # Smart 批次下，被当前 anchor 吸收但最终未触发回复的后续消息应回落为普通缓存
@@ -334,7 +337,7 @@
                  smart_batch_messages = self._smart_batch_snapshots.pop(
                      early_message_id, []
                  )
-@@ -10271,7 +10382,7 @@
+@@ -10271,7 +10385,7 @@
          wait_interval = self.concurrent_wait_interval  # 每次循环等待秒数
 
          for loop_count in range(max_wait_loops):
@@ -343,7 +346,7 @@
                  consumed = await SmartConcurrentManager.is_consumed(message_id)
                  if consumed:
                      anchor_processing_id = await SmartConcurrentManager.get_consumer(
-@@ -10485,7 +10596,7 @@
+@@ -10485,7 +10599,7 @@
                  logger.info("[主动对话] 读空气AI判定确认回复，已重置主动对话计时器")
 
              # 🆕 v1.2.1: 记录回复到密度管理器（主动对话确认回复）
@@ -352,7 +355,7 @@
                  try:
                      await ReplyDensityManager.record_reply(chat_key)
                  except Exception as e:
-@@ -10605,7 +10716,7 @@
+@@ -10605,7 +10719,7 @@
          try:
              smart_batch_reply_hint = ""
              # 🆕 Smart 模式：回复阶段与决策阶段使用同一批次视图，避免顺序与主次不一致
@@ -361,7 +364,7 @@
                  smart_batch_messages = self._smart_batch_snapshots.get(message_id, [])
                  if smart_batch_messages:
                      try:
-@@ -10668,7 +10779,7 @@
+@@ -10668,7 +10782,7 @@
                      self._chat_flow_owners.pop(chat_id, None)
 
              # 🆕 Smart模式清理——确保消息从待处理池移除，避免异常路径残留
@@ -370,7 +373,29 @@
                  await SmartConcurrentManager.remove_self(chat_id, message_id)
 
      @filter.on_llm_request(priority=-1)
-@@ -11258,7 +11369,7 @@
+@@ -11201,12 +11315,20 @@
+                     return
+
+             result = event.get_result()
+-            if not result or not hasattr(result, "chain") or not result.chain:
++            if not result or not hasattr(result, "chain"):
+                 return
+
+             # 仅处理 LLM 最终结果（非流式片段）
+             if not result.is_llm_result():
+                 return
++
++            if event.get_extra("dfy_qq_turn") == "ambient" and all(isinstance(c, Plain) for c in result.chain or []):
++                body = "".join(c.text or "" for c in result.chain or []).strip()
++                if not body or body == "[NO_REPLY]":
++                    event.clear_result()
++                    self.qq_turn_window.finish(event.get_extra("dfy_qq_turn_claim"), sent=False)
++                    self._agent_done_flags.discard(message_id)
++                    return
+
+             # 提取纯文本
+             reply_text = "".join(
+@@ -11258,7 +11380,7 @@
 
              # 🔧 重要：重复检测必须在错字模拟之前执行，基于原始内容检测
              # 清理过期缓存并进行重复检查（使用可配置参数）
@@ -379,7 +404,7 @@
                  now_ts = time.time()
                  if chat_id not in self.recent_replies_cache:
                      self.recent_replies_cache[chat_id] = []
-@@ -11411,6 +11522,9 @@
+@@ -11411,6 +11533,9 @@
          注意：所有消息发送都会触发，需要检查是否本插件的回复
          """
          try:
@@ -389,7 +414,7 @@
              # 获取会话信息（用于检查标记）
              platform_name = event.get_platform_name()
              is_private = event.is_private_chat()
-@@ -11454,7 +11568,10 @@
+@@ -11454,7 +11579,10 @@
                  # on_llm_response 在 agent 真正完成时设置此标志
                  # 如果agent还未完成（工具调用中），回复文本已在 on_decorating_result 中累积，
                  # 此处暂不保存，等待后续的最终调用

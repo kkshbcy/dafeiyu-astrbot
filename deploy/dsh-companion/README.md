@@ -12,6 +12,12 @@
 - 对 AstrBot 4.29.4 的 `astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py` 副本运行 `patch -p1 < qq-private-scope-4.29.4.patch`，将副本只读挂回同一位置。QQ 群临时私聊从收消息时就有独立历史，只有 OneBot 标记为好友的普通私信可以使用主人权限。
 - 群聊可配 Group Chat Plus 的 `enable_group_wait_window` 和 `group_wait_window_timeout_ms`。微信使用 WeChat Native 的 `group_reply_mode=probability`、`unique_session=false`，同时关掉 AstrBot 内置概率抢答。LivingMemory 需单独选择 embedding 提供商才能启动自动记忆。DSH 绑定和书架进度可以独立使用。
 
+## 固定角色卡
+
+在桥服务设置 `DAFEIYU_DSH_PERSONA_DB` 为宿主机上的 AstrBot `data_v4.db` 路径，并设置 `DAFEIYU_DSH_PERSONA_ID` 为要固定的角色卡 ID。角色仍在 AstrBot 管理。桥服务以只读方式读取角色卡，在普通聊天的系统提示词与角色卡完整匹配时，使用独立的 DSH ACP 进程把角色卡放到系统提示词。此进程的 profile 将 `system-prompt.personaSuffix` 用于固定角色卡。聊天会话继续使用原来的绑定，每轮提示词只移除匹配的角色卡段落。
+
+保存新角色卡后，下一轮匹配时使用新内容。其他角色、辅助任务和未匹配的请求按原方式发送提示词。旧会话记录保留原内容。
+
 ## 本地中文记忆
 
 4 核 CPU 主机可用 Hugging Face Text Embeddings Inference 的 CPU 镜像运行 `BAAI/bge-small-zh-v1.5`。模型输出 512 维，单段最多 512 个 token，适合给聊天片段和摘要做检索。AstrBot 使用 host 网络时，将向量服务只发布到宿主机回环地址。以下配置已在 Linux x86_64 的隔离环境验证。[模型说明](https://huggingface.co/BAAI/bge-small-zh-v1.5/tree/7999e1d3359715c523056ef9478215996d62a620)

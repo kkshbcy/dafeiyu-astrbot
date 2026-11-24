@@ -5,6 +5,7 @@ import { mkdtemp, rm, stat, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 import { start } from '../deploy/dsh-companion/server.mjs';
 
 const fixture=fileURLToPath(new URL('./dsh-fixtures/acp.mjs',import.meta.url));
@@ -45,4 +46,59 @@ test('one official-protocol connection, isolated durable and auxiliary turns, sc
     assert.notEqual(rebuilt.sid,first.sid);assert.deepEqual(rebuilt.env.conversation,base.history);assert(rebuilt.knowsFirst);
     const invalid=await ask(socket,{...base,binding:'/tmp/foreign'});assert.equal(invalid.ok,false);
   }finally{await app.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('fixed persona follows AstrBot edits while existing conversations and auxiliary prompts stay isolated',async()=>{
+  const state=await mkdtemp(join(tmpdir(),'dfy-persona-')),socket=join(state,'s');
+  const database=join(state,'astrbot.db');
+  const db=new DatabaseSync(database);
+  db.exec('CREATE TABLE personas (persona_id TEXT PRIMARY KEY, system_prompt TEXT)');
+  const card='鲸鱼娘｜说话干脆，偶尔幽默。';
+  const edited='鲸鱼娘｜说话温和，偶尔幽默。';
+  const setCard=db.prepare('INSERT OR REPLACE INTO personas VALUES (?, ?)');
+  setCard.run('whale',card);
+  const common={socket,state,command:process.execPath,args:[fixture],deadline:2500};
+  const options={...common,fixedPersona:{database,id:'whale'}};
+  let app=await start(common);
+  const run=async(input)=>{
+    const reply=await ask(socket,input);
+    assert.equal(reply.ok,true,reply.error);
+    return JSON.parse(reply.text);
+  };
+  try{
+    const old=await run({...base,system:[card]});
+    await app.close();
+    app=await start(options);
+    const turns=await Promise.all([1,2].map(i=>run({...base,system:[`群规则\n\n${card}\n\n心境 ${i}`]})));
+    for (const [index,turn] of turns.entries()){
+      assert.equal(turn.sid,old.sid);
+      assert.equal(turn.fixedCard,card);
+      assert.deepEqual(turn.env.instructions,[`群规则\n\n心境 ${index+1}`]);
+      assert.deepEqual(turn.env.conversation,base.recent);
+      assert(turn.knowsFirst);
+    }
+    const aux=await run({...base,binding:null,system:[card,'只描述图片']});
+    assert.equal(aux.fixedCard,null);
+    assert.deepEqual(aux.env.instructions,[card,'只描述图片']);
+    const unrelated=await run({...base,binding:'b'.repeat(64),system:[`引述「${card}」`,'其他角色']});
+    assert.equal(unrelated.fixedCard,null);
+    assert.deepEqual(unrelated.env.instructions,[`引述「${card}」`,'其他角色']);
+    assert.notEqual(unrelated.sid,old.sid);
+    setCard.run('whale',edited);
+    const next=await run({...base,system:[edited,'新近记忆']});
+    assert.equal(next.sid,old.sid);
+    assert.equal(next.fixedCard,edited);
+    assert.deepEqual(next.env.instructions,['新近记忆']);
+    await app.close();
+    app=await start(options);
+    const reopened=await run({...base,system:[edited]});
+    assert.equal(reopened.sid,old.sid);
+    assert.equal(reopened.fixedCard,edited);
+    assert.deepEqual(reopened.env.instructions,[]);
+    db.prepare('DELETE FROM personas').run();
+    const fallback=await run({...base,system:[edited,'继续聊']});
+    assert.equal(fallback.sid,old.sid);
+    assert.equal(fallback.fixedCard,null);
+    assert.deepEqual(fallback.env.instructions,[edited,'继续聊']);
+  }finally{db.close();await app.close();await rm(state,{recursive:true,force:true});}
 });

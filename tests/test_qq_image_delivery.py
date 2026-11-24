@@ -131,11 +131,14 @@ class QQImageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.record(event, "old")
         newest = self.record(event, "new", status="failed", count=0)
         self.record(self.event(event.unified_msg_origin, sender="303", group="202"), "foreign", status="running")
-        self.assertIn("失败", self.delivery.status(event, "出来了吗"))
+        self.assertIn("没弄成", self.delivery.status(event, "出来了吗"))
         self.assertIn("更早", self.delivery.status(event, "出来了吗"))
         self.assertIsNone(self.delivery.status(self.event(), "出来了吗"))
         self.assertIsNone(self.delivery.status(event, "出来了吗？再画一张"))
-        self.assertIn("还在画", self.delivery.status(self.event(event.unified_msg_origin, sender="303", group="202"), "出来了吗"))
+        self.assertEqual(
+            self.delivery.status(self.event(event.unified_msg_origin, sender="303", group="202"), "出来了吗"),
+            "上一张还没好呢。",
+        )
         self.send.assert_not_awaited()
         self.assertIsNone(await self.delivery.retry(event))
         self.assertEqual(newest.qq_image_receipts, {})
@@ -152,7 +155,7 @@ class QQImageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         for text in ("还没有吗", "还没好吗？", "好了没呀", "有了吗？"):
             with self.subTest(text=text):
                 answer = self.delivery.status(event, text, contexts=history)
-                self.assertIn("失败", answer)
+                self.assertIn("没弄成", answer)
                 self.assertIn("补发", answer)
                 self.assertNotIn("排队", answer)
         # A genuine topic change takes precedence over an older drawing.
@@ -167,7 +170,7 @@ class QQImageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.record_receipt(old.task_id, old.result_paths[0], 123)
         self.record(event, "again", status="failed", count=0)
         summary = self.delivery.chat_context(event)
-        self.assertIn("失败", summary)
+        self.assertIn("没弄成", summary)
         self.assertIn("已经发", summary)
         self.assertNotIn(str(self.originals), summary)
         self.assertFalse(self.delivery.chat_context(self.event("qq:GroupMessage:202", group="202")))

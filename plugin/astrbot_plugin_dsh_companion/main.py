@@ -9,7 +9,8 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest, ProviderType
 from astrbot.core.provider.provider import Provider
 from astrbot.core.provider.register import register_provider_adapter, provider_cls_map, provider_registry
-from .contract import allowed_tools, check_proposal, conversation_key, owner_private, pack_messages
+from .contract import (allowed_tools, check_proposal, conversation_key, natural_qq_image_reply,
+                       owner_private, pack_messages, prepare_qq_image_reply)
 from .library import Library
 from .qq_images import is_image_followup
 
@@ -46,8 +47,8 @@ class Harness(Provider):
                         func_tool=None, contexts=None, system_prompt=None, tool_calls_result=None,
                         model=None, extra_user_content_parts=None, **kwargs):
         ticket = None if self.provider_config.get("auxiliary") else tickets.get(session_id)
-        scope, owner, message_id, fallback_cid, submitted, image_followup, image_status = (
-            ticket or ("", False, "", None, set(), False, None)
+        scope, owner, message_id, fallback_cid, submitted, image_followup, image_status, qq = (
+            ticket or ("", False, "", None, set(), False, None, False)
         )
         if image_status:
             return LLMResponse(role="assistant", completion_text=image_status)
@@ -63,9 +64,10 @@ class Harness(Provider):
             for result in results:
                 messages.extend(result.to_openai_messages())
         packet = pack_messages(messages)
+        image_reply = prepare_qq_image_reply(packet) if qq else None
         schemas = func_tool.openai_schema() if func_tool else []
         packet["binding"] = conversation_key(scope, kwargs.get("conversation_id") or fallback_cid)
-        packet["tools"] = allowed_tools(schemas, bool(ticket), owner)
+        packet["tools"] = allowed_tools(schemas, bool(ticket), owner, qq=qq)
         if image_followup:
             packet["tools"] = [tool for tool in packet["tools"] if tool["name"] != "generate_image"]
         packet["event"] = message_id
@@ -98,7 +100,7 @@ class Harness(Provider):
                                tools_call_ids=[call["id"]])
         if not isinstance(response.get("text"), str) or not response["text"].strip():
             raise RuntimeError("DSH 没有返回可发送的正文")
-        return LLMResponse(role="assistant", completion_text=response["text"])
+        return LLMResponse(role="assistant", completion_text=natural_qq_image_reply(response["text"], image_reply))
 
     async def text_chat_stream(self, *args, **kwargs):
         yield await self.text_chat(*args, **kwargs)
@@ -165,7 +167,7 @@ class Companion(Star):
         ticket = "dfy:" + uuid.uuid4().hex
         tickets[ticket] = (
             scope, self.is_owner(event), str(event.message_obj.message_id or ""), conversation,
-            set(), image_followup, image_status,
+            set(), image_followup, image_status, platform == "aiocqhttp",
         )
         if len(tickets) > 2048:
             tickets.popitem(last=False)

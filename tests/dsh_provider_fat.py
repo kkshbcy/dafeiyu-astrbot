@@ -45,20 +45,21 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
             provider = Harness({"id": "fat", "type": "dsh_companion_acp"}, {})
             with patch("asyncio.open_unix_connection", side_effect=AssertionError("进度查询不应提交到 DSH")):
                 answer = await provider.text_chat(prompt=req.prompt, session_id=req.session_id)
-            self.assertIn("失败", answer.completion_text)
+            self.assertIn("没弄成", answer.completion_text)
             self.assertNotIn("排队", answer.completion_text)
 
             event.message_obj.message_str = "刚刚忙了半天，那幅大作到底怎么样啦"
             await plugin.bind_turn(event, req)
             self.assertIn("最近一次", req.system_prompt)
-            self.assertIn("失败", req.system_prompt)
+            self.assertIn("没弄成", req.system_prompt)
 
     async def test_tool_loop_carries_the_actual_receipt_back_to_the_model(self):
         from astrbot.core.agent.hooks import BaseAgentRunHooks
         from astrbot.core.agent.run_context import ContextWrapper
         from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
         from mcp.types import CallToolResult, TextContent
-        for receipt in ("图片已生成", "生成失败", "供应商结果未知"):
+        accepted = "✅ 生图任务已提交，正在后台执行。\n任务ID: 1234abcd\n状态: 排队/运行中"
+        for receipt in ("图片已生成", "生成失败", "供应商结果未知", accepted, None):
             with self.subTest(receipt=receipt), tempfile.TemporaryDirectory() as tmp:
                 path = str(Path(tmp) / "tool.sock")
                 calls, sent = [], []
@@ -67,8 +68,11 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
                     results = [m["content"] for m in packet["recent"] if m["role"] == "tool"]
                     sent.append(results)
                     result = {"ok":True, "call":{"name":"generate_image","id":"first","args":{"prompt":"云"}}}
-                    if results:
-                        result = {"ok":True,"text":"回执：" + results[-1]}
+                    if receipt is None:
+                        result = {"ok": True, "text": "今天不太想给人看，改天嘛。"}
+                    elif results:
+                        text = "在排队了，还没出图。等它跑完" if receipt == accepted else "回执：" + results[-1]
+                        result = {"ok":True,"text":text}
                     writer.write(json.dumps(result,ensure_ascii=False).encode() + b"\n")
                     await writer.drain()
                     writer.close()
@@ -100,11 +104,20 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
                         tool_executor=Executor, agent_hooks=BaseAgentRunHooks(), streaming=False)
                     async for _ in runner.step_until_done(3):
                         pass
-                    self.assertEqual(calls,["generate_image"])
                     self.assertEqual(sent[0],[])
-                    self.assertIn(receipt,runner.get_final_llm_resp().completion_text)
-                    if receipt != "图片已生成":
-                        self.assertNotIn("图片已生成",runner.get_final_llm_resp().completion_text)
+                    text = runner.get_final_llm_resp().completion_text
+                    if receipt is None:
+                        self.assertEqual(calls, [])
+                        self.assertEqual(text, "今天不太想给人看，改天嘛。")
+                    else:
+                        self.assertEqual(calls, ["generate_image"])
+                        if receipt == accepted:
+                            self.assertEqual(sent[-1], ["已接下这张图，图片尚未送出。"])
+                            self.assertEqual(text, "好呀。")
+                        else:
+                            self.assertIn(receipt, text)
+                            if receipt != "图片已生成":
+                                self.assertNotIn("图片已生成", text)
                 finally:
                     server.close()
                     await server.wait_closed()

@@ -11,6 +11,16 @@ PRIVATE = {"df_reading_progress", "df_read_book", "df_list_books", "df_goal", "d
            "df_method", "df_life_status", "df_workshop", "df_interest", "df_recall", "df_knowledge"}
 MAX_HISTORY_BYTES = 384 * 1024
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+PHOTO_STATUS_LANGUAGE = re.compile(
+    r"排队|还没出图|出图|生图|生成|模型|调用|供应商|服务端|后台|任务|接口|工具|跑完|跑图|回执"
+    r"|(?i:(?<![a-z])(?:api|ai)(?![a-z]))|(?:好|完)了?[，, ]*(?:我|就|再|直接|马上|给你)+发"
+    r"|(?:已经|刚刚|已)(?:给你)?(?:发|[画拍]好)|给你发了"
+)
+QQ_SELFIE_WILLINGNESS = (
+    "别人想看你的自拍或照片时，先按你当下的心境、和对方的关系以及对方的问法决定愿不愿意。"
+    "心烦、想独处或觉得突然时，可以随口拒绝、打趣或岔开话题，不调用这个工具，也不编造故障。"
+    "想给对方看时再用。"
+)
 
 
 def owner_private(scope, sender, allowed, *, wechat_message=None):
@@ -36,10 +46,17 @@ def conversation_key(scope, conversation):
     return hashlib.sha256(json.dumps([scope, conversation], ensure_ascii=False).encode()).hexdigest()
 
 
-def allowed_tools(schemas, main_turn, owner):
+def allowed_tools(schemas, main_turn, owner, *, qq=False):
     permitted = (PUBLIC | PRIVATE if owner else PUBLIC) if main_turn else set()
-    return [s["function"] for s in schemas if s.get("type") == "function"
-            and s.get("function", {}).get("name") in permitted]
+    tools = [s["function"] for s in schemas if s.get("type") == "function"
+             and s.get("function", {}).get("name") in permitted]
+    if not qq:
+        return tools
+    return [
+        {**tool, "description": (tool.get("description") or "") + "\n" + QQ_SELFIE_WILLINGNESS}
+        if tool["name"] == "generate_image" else tool
+        for tool in tools
+    ]
 
 
 def check_proposal(call, available):
@@ -48,6 +65,40 @@ def check_proposal(call, available):
             or not call["id"]):
         raise ValueError("DSH requested a tool unavailable in this conversation")
     return call
+
+
+def prepare_qq_image_reply(packet):
+    """Find a real, current image receipt and phrase it for a chat response."""
+    recent = packet["recent"]
+    if not recent or recent[-1]["role"] != "tool":
+        return None
+    receipt = recent[-1]
+    call_id = receipt.get("tool_call_id")
+    if not call_id or not any(
+        call.get("id") == call_id and call.get("function", {}).get("name") == "generate_image"
+        for item in recent[:-1] if item["role"] == "assistant"
+        for call in item.get("tool_calls", [])
+    ):
+        return None
+    content = receipt["content"]
+    if content.startswith("✅ 生图任务已提交") and "\n任务ID:" in content:
+        receipt["content"] = "已接下这张图，图片尚未送出。"
+        packet["system"].append(
+            "自然接对方刚才的话，像平时聊天，可以随口答应或跟着对方的语气轻轻打趣。"
+            "无需播报处理进度，也不用承诺弄好后会发送。"
+            "没送到的图片不要说已发，未完成的也不要说已经好了。"
+        )
+        return "accepted"
+    if content.startswith("❌ 生图任务提交失败"):
+        packet["system"].append("只告诉对方这张没弄成。用聊天语气，避免复述后台错误和技术术语。")
+        return "rejected"
+    return None
+
+
+def natural_qq_image_reply(text, state):
+    if state and PHOTO_STATUS_LANGUAGE.search(text):
+        return "好呀。" if state == "accepted" else "这张没弄成。"
+    return text
 
 
 def _as_dict(message):

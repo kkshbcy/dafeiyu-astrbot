@@ -166,25 +166,27 @@ class QQImageDelivery:
             stamp = record.created_at.strftime("%m-%d %H:%M")
             lines.append(f"{label}（{stamp}）{self._state(record)}")
         return ("仅在对方谈及生图时参考当前会话中对方的真实任务记录。"
-                "询问进度或表示没收到图片时，以这些记录为准。只有明确要新作或改画才提交新图。\n"
+                "询问进度或表示没收到图片时，以这些记录为准。"
+                "他们想要新照片时，按当下心情决定愿不愿意，旧照片没弄成不代表这次也不行。"
+                "平时按对话接话，无需复述状态或预告什么时候发。\n"
                 + "\n".join(lines))
 
     def _state(self, latest):
         if latest.status in {"queued", "running", "cancelling", "cancelled"}:
             return {
-                "queued": "还在排队，画好会发到这里。",
-                "running": "还在画，画好会发到这里。",
-                "cancelling": "正在取消。",
-                "cancelled": "已经取消了。",
+                "queued": "还没好呢。",
+                "running": "还没好呢。",
+                "cancelling": "先停一下。",
+                "cancelled": "先不发了。",
             }[latest.status]
         if latest.status == "failed":
-            return "生成失败了。"
+            return "没弄成。"
         if latest.task_id in self.in_flight:
-            return "画好了，正在发到这里。"
+            return "好了，正给你发呢。"
         if self._can_retry(latest):
-            return "画好了，还有图没收到 QQ 发送回执。发「/补发生图」可以补发。"
+            return "好了，刚才没发过去。发「/补发生图」，我再发一次。"
         if self._pending(latest):
-            return "画好了，但服务器上找不到可补发的文件。"
+            return "找不到了。"
         return "已经发到这个聊天里了。" if latest.delivered else "没有可发送的图片。"
 
     async def deliver(self, record, target):

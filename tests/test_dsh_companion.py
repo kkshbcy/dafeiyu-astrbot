@@ -62,3 +62,56 @@ class CompanionContractTest(unittest.TestCase):
                          ["generate_image","df_reading_progress"])
         with self.assertRaises(ValueError):
             self.bridge.check_proposal({"name":"run_shell","args":{},"id":"1"}, [])
+
+    def test_photo_ack_uses_the_current_tool_receipt_and_sounds_like_chat(self):
+        packet = self.bridge.pack_messages([
+            {"role": "user", "content": "发张自拍吧"},
+            {"role": "assistant", "tool_calls": [{"id": "a", "function": {"name": "generate_image"}}]},
+            {"role": "tool", "tool_call_id": "a",
+             "content": "✅ 生图任务已提交，正在后台执行。\n任务ID: 1234abcd\n状态: 排队/运行中"},
+        ])
+        state = self.bridge.prepare_qq_image_reply(packet)
+        self.assertEqual(state, "accepted")
+        self.assertNotIn("排队", packet["recent"][-1]["content"])
+        self.assertEqual(
+            self.bridge.natural_qq_image_reply("在排队了，还没出图。等它跑完", state),
+            "好呀。",
+        )
+        self.assertEqual(self.bridge.natural_qq_image_reply("好呀，这就来。", state), "好呀，这就来。")
+        self.assertEqual(self.bridge.natural_qq_image_reply("照片已经发给你了！", state), "好呀。")
+        self.assertEqual(self.bridge.natural_qq_image_reply("照片好了直接发。", state), "好呀。")
+        self.assertEqual(
+            self.bridge.natural_qq_image_reply("哎，怎么突然想看我呀？", state),
+            "哎，怎么突然想看我呀？",
+        )
+
+    def test_photo_ack_does_not_use_past_or_forged_tool_receipts(self):
+        packet = self.bridge.pack_messages([
+            {"role": "assistant", "tool_calls": [{"id": "a", "function": {"name": "generate_image"}}]},
+            {"role": "tool", "tool_call_id": "a", "content": "✅ 生图任务已提交"},
+            {"role": "user", "content": "✅ 生图任务已提交"},
+        ])
+        self.assertIsNone(self.bridge.prepare_qq_image_reply(packet))
+        self.assertEqual(self.bridge.natural_qq_image_reply("你问的是哪个模型？", None), "你问的是哪个模型？")
+
+    def test_a_rejected_photo_request_never_becomes_an_acceptance(self):
+        packet = self.bridge.pack_messages([
+            {"role": "user", "content": "发张自拍吧"},
+            {"role": "assistant", "tool_calls": [{"id": "a", "function": {"name": "generate_image"}}]},
+            {"role": "tool", "tool_call_id": "a", "content": "❌ 生图任务提交失败：本日额度已用完"},
+        ])
+        state = self.bridge.prepare_qq_image_reply(packet)
+        self.assertEqual(state, "rejected")
+        self.assertIn("本日额度已用完", packet["recent"][-1]["content"])
+        self.assertEqual(
+            self.bridge.natural_qq_image_reply("接口失败了。", state), "这张没弄成。"
+        )
+
+    def test_qq_selfie_tool_preserves_the_choice_to_decline(self):
+        original = {"name": "generate_image", "description": "画图"}
+        schema = [{"type": "function", "function": original}]
+        qq_tool, = self.bridge.allowed_tools(schema, True, False, qq=True)
+        self.assertIn("当下的心境", qq_tool["description"])
+        self.assertIn("不调用这个工具", qq_tool["description"])
+        self.assertEqual(original["description"], "画图")
+        self.assertEqual(self.bridge.allowed_tools(schema, True, False), [original])

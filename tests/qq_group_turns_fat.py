@@ -195,6 +195,89 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.consume(event), [])
         self.assertIsNone(event.get_extra("dfy_qq_turn"))
 
+    def enable_owner(self):
+        star = SimpleNamespace(activated=True, star_cls=SimpleNamespace(config={
+            "owner_private_scopes": ["qq:FriendMessage:555", "wx:FriendMessage:777"]}))
+        self.context.get_registered_star = lambda name: star if name == "astrbot_plugin_dsh_companion" else None
+        self.plugin.qq_turn_window.draw = lambda: 0.999
+
+    async def test_real_owner_at_sends_only_a_public_draft_or_stays_quiet(self):
+        self.enable_owner()
+        event = self.event(At(qq="555"), Plain("活动在哪报名？"))
+        self.judge.text_chat.return_value.completion_text = '{"reply":"群公告里的报名表就行。"}'
+        with patch.object(gcp.ReplyHandler, "generate_reply", new_callable=AsyncMock) as main_model:
+            replies = [res async for res in self.plugin.on_group_message(event)]
+            self.assertEqual(len(replies), 1)
+            self.assertEqual(replies[0].chain[0].text, "群公告里的报名表就行。")
+            self.assertTrue(event.call_llm)
+            main_model.assert_not_awaited()
+        self.assertEqual(event.get_extra("dfy_qq_turn"), "owner_help")
+        self.judge.text_chat.return_value.completion_text = '{"reply":null}'
+        self.plugin.qq_turn_window.draw = lambda: 0
+        event = self.event(At(qq="555"), Plain("你能替我签名确认吗？"))
+        self.assertEqual(await self.consume(event), [])
+        self.assertEqual(event.get_extra("dfy_qq_turn"), "owner_silent")
+        self.assertTrue(event.call_llm)
+
+    async def test_owner_at_carries_through_burst_and_owner_reply_cancels_only_its_group(self):
+        self.enable_owner()
+        self.plugin.enable_group_wait_window = True
+        self.plugin.group_wait_window_timeout_ms = 150
+        self.plugin.pending_cache_max_count = 10
+        self.plugin._group_wait_window_max_extra = 2
+        async def collect(event):
+            return [res async for res in self.plugin.on_group_message(event)]
+        self.judge.text_chat.return_value.completion_text = '{"reply":"点群公告里的报名表。"}'
+        first, second = await asyncio.gather(collect(self.event(At(qq="555"))),
+                                             collect(self.event(Plain("报名入口？"))))
+        self.assertEqual([len(first),len(second)],[0,1])
+        self.assertIn("报名入口", self.judge.text_chat.await_args.kwargs["prompt"])
+        async def scenario(owner_group):
+            entered, release = asyncio.Event(), asyncio.Event()
+            async def draft(**kw):
+                if "group_history" in json.loads(kw["prompt"]):
+                    entered.set(); await release.wait()
+                    return SimpleNamespace(completion_text='{"reply":"周五。"}')
+                return SimpleNamespace(completion_text="no")
+            self.judge.text_chat.side_effect = draft
+            job = asyncio.create_task(collect(self.event(At(qq="555"),Plain("报名截止哪天？"))))
+            await asyncio.wait_for(entered.wait(), 2)
+            owner = self.event(Plain("我来回"),group=owner_group)
+            owner.message_obj.sender.user_id = "555"
+            owner._has_send_oper = True  # an earlier handler already handled the owner’s message
+            await collect(owner)
+            release.set()
+            return await job
+        self.assertEqual(await scenario("g"), [])
+        self.assertEqual(len(await scenario("another")),1)
+
+    async def test_delivered_owner_answer_enters_group_history_exactly_once(self):
+        self.enable_owner()
+        event = self.event(At(qq="555"), Plain("报名入口在哪？"))
+        self.judge.text_chat.return_value.completion_text = '{"reply":"看群公告。"}'
+        record = AsyncMock()
+        with patch.object(gcp.ContextManager, "save_bot_message", record):
+            handler = self.plugin.on_group_message(event)
+            result = await anext(handler)
+            try:
+                event.set_result(result)
+                event._has_send_oper = True
+                await self.plugin.after_message_sent(event)
+                await self.plugin.after_message_sent(event)
+                record.assert_awaited_once()
+                self.assertIn("看群公告。", str(record.await_args))
+            finally:
+                await handler.aclose()
+
+    async def test_plain_owner_text_other_at_and_self_at_keep_existing_logic(self):
+        self.enable_owner()
+        for part in (Plain("@555 你在吗"), At(qq="777"), Reply(id="x",sender_id=555), At(qq="all")):
+            self.assertEqual(await self.consume(self.event(part,Plain("群里聊聊"))),[])
+            self.assertNotIn("group_history", json.loads(self.judge.text_chat.await_args.kwargs["prompt"]))
+        event = self.event(At(qq="555"), At(qq="11"), Plain("小鱼你也说说"))
+        self.assertEqual(len(await self.consume(event)),1)
+        self.assertEqual(event.get_extra("dfy_qq_turn"),"mention")
+
 
 if __name__ == "__main__":
     unittest.main()

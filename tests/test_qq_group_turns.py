@@ -147,3 +147,59 @@ class GroupTurnsTest(unittest.IsolatedAsyncioTestCase):
             await first
         self.assertEqual(bursts.waiting, {})
         self.assertEqual(await bursts.collect(("qq", "a", "user"), "另起", direct=True, **options), ["另起"])
+
+class OwnerHelpTest(unittest.IsolatedAsyncioTestCase):
+    setUp = GroupTurnsTest.setUp
+
+    async def test_owner_candidate_uses_only_the_public_turn_and_never_rolls(self):
+        from weakref import WeakValueDictionary
+        self.event.get_platform_id = lambda: 'qq'
+        star = SimpleNamespace(activated=True, star_cls=SimpleNamespace(config={
+            'owner_private_scopes':['qq:FriendMessage:555','wx:FriendMessage:777']}))
+        context = SimpleNamespace(get_registered_star=lambda _:star)
+        pending = WeakValueDictionary()
+        ticket = turns.owner_mention(context, self.event, {'555'}, pending)
+        self.assertIsNotNone(ticket)
+        self.assertIsNone(turns.owner_mention(context, self.event, {'777'}, pending))
+        self.assertIsNone(turns.owner_mention(context, self.event, {'all'}, pending))
+        extras = {}
+        self.event.set_extra = extras.__setitem__
+        self.provider.text_chat.return_value.completion_text = '{"reply":"群公告第二条有入口。"}'
+        reason, claim = await turns.owner_reply(self.window,self.event,self.history,['报名入口在哪？'],ticket,
+            provider=self.provider, slots=self.slots, timeout=3, seconds=300, limit=10)
+        self.assertEqual(reason,'owner_help')
+        self.assertEqual(extras['dfy_qq_owner_answer'],'群公告第二条有入口。')
+        self.draw.assert_not_called()
+        kw = self.provider.text_chat.await_args.kwargs
+        self.assertIsNone(kw['func_tool'])
+        self.assertEqual(kw['contexts'],[])
+        self.assertIn('报名入口在哪',kw['prompt'])
+        self.window.finish(claim,sent=True)
+        self.event.get_sender_id=lambda:'555'
+        turns.yield_to_sender(self.event, pending)
+        self.assertIsNone(turns.owner_mention(context,self.event,{'555'},pending))
+        self.assertTrue(ticket[1].is_set())
+
+    async def test_owner_declines_errors_cancel_and_cap_stay_silent(self):
+        self.event.set_extra = Mock()
+        ticket=('555',asyncio.Event())
+        async def ask():
+            return await turns.owner_reply(self.window,self.event,[],['你明天来不来？'],ticket,
+                provider=self.provider,slots=self.slots,timeout=1,seconds=300,limit=1)
+        for text in ['{"reply":null}','yes','{}','{"reply":""}']:
+            self.provider.text_chat.return_value.completion_text=text
+            self.assertIsNone((await ask())[1]); self.assertFalse(self.window.pending)
+        self.provider.text_chat.side_effect=RuntimeError('test')
+        self.assertIsNone((await ask())[1])
+        self.provider.text_chat.reset_mock()
+        _, held=self.window.reserve(turns.room_key(self.event),'mention',1,300,1)
+        self.assertEqual((await ask())[0],'full')
+        self.provider.text_chat.assert_not_awaited()
+        self.window.finish(held,sent=False)
+        async def owner_spoke(**_):
+            ticket[1].set()
+            return SimpleNamespace(completion_text='{"reply":"可以。"}')
+        self.provider.text_chat.side_effect=owner_spoke
+        self.assertIsNone((await ask())[1])
+        self.assertFalse(self.window.pending)
+        self.event.set_extra.assert_not_called()

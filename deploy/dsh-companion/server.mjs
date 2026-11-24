@@ -61,7 +61,7 @@ export async function start({state,socket,command,args,deadline=160000,fixedPers
       signal.throwIfAborted();
       if(active>=4) throw new Error('DSH busy');
       active++; admitted=true;
-      personaTurn=input.binding ? await persona?.acquire(input.system) : null;
+      personaTurn=input.binding ? await persona?.acquire(input.binding,input.system) : null;
       acp=personaTurn?.client ?? await standard.connect();
       signal.throwIfAborted();
       const servers=[];

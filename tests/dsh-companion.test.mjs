@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createConnection } from 'node:net';
-import { mkdtemp, rm, stat, unlink } from 'node:fs/promises';
+import { mkdtemp, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { start } from '../deploy/dsh-companion/server.mjs';
 
 const fixture=fileURLToPath(new URL('./dsh-fixtures/acp.mjs',import.meta.url));
@@ -52,7 +53,22 @@ test('fixed persona follows AstrBot edits while existing conversations and auxil
   const state=await mkdtemp(join(tmpdir(),'dfy-persona-')),socket=join(state,'s');
   const database=join(state,'astrbot.db');
   const db=new DatabaseSync(database);
-  db.exec('CREATE TABLE personas (persona_id TEXT PRIMARY KEY, system_prompt TEXT)');
+  db.exec(`
+    CREATE TABLE personas (persona_id TEXT PRIMARY KEY, system_prompt TEXT);
+    CREATE TABLE conversations (platform_id TEXT, user_id TEXT, conversation_id TEXT, persona_id TEXT);
+    CREATE TABLE preferences (scope TEXT, scope_id TEXT, key TEXT, value TEXT)
+  `);
+  await writeFile(join(state,'cmd_config.json'),JSON.stringify({
+    agent_runner:{runner_type:'local',config:{persona:{persona_id:'whale'}}},
+    platform:[{id:'qq',enable:true,type:'aiocqhttp'},{id:'wx',enable:true,type:'wechat_native'}]
+  }));
+  const addConversation=db.prepare('INSERT INTO conversations VALUES (?, ?, ?, ?)');
+  const bindingFor=(scope,cid)=>createHash('sha256').update(`[${JSON.stringify(scope)}, ${JSON.stringify(cid)}]`).digest('hex');
+  const scope='qq:GroupMessage:101',otherScope='qq:FriendMessage:102';
+  addConversation.run('qq',scope,'group',null);
+  addConversation.run('qq',otherScope,'other','other-persona');
+  addConversation.run('wx','wx:FriendMessage:103','wechat',null);
+  const chat={...base,binding:bindingFor(scope,'group')};
   const card='鲸鱼娘｜说话干脆，偶尔幽默。';
   const edited='鲸鱼娘｜说话温和，偶尔幽默。';
   const setCard=db.prepare('INSERT OR REPLACE INTO personas VALUES (?, ?)');
@@ -66,10 +82,10 @@ test('fixed persona follows AstrBot edits while existing conversations and auxil
     return JSON.parse(reply.text);
   };
   try{
-    const old=await run({...base,system:[card]});
+    const old=await run({...chat,system:[card]});
     await app.close();
     app=await start(options);
-    const turns=await Promise.all([1,2].map(i=>run({...base,system:[`群规则\n\n${card}\n\n心境 ${i}`]})));
+    const turns=await Promise.all([1,2].map(i=>run({...chat,system:[`群规则\n\n${card}\n\n心境 ${i}`]})));
     for (const [index,turn] of turns.entries()){
       assert.equal(turn.sid,old.sid);
       assert.equal(turn.fixedCard,card);
@@ -80,23 +96,28 @@ test('fixed persona follows AstrBot edits while existing conversations and auxil
     const aux=await run({...base,binding:null,system:[card,'只描述图片']});
     assert.equal(aux.fixedCard,null);
     assert.deepEqual(aux.env.instructions,[card,'只描述图片']);
-    const unrelated=await run({...base,binding:'b'.repeat(64),system:[`引述「${card}」`,'其他角色']});
+    const unrelated=await run({...chat,binding:bindingFor(otherScope,'other'),system:[card,'其他角色']});
     assert.equal(unrelated.fixedCard,null);
-    assert.deepEqual(unrelated.env.instructions,[`引述「${card}」`,'其他角色']);
+    assert.deepEqual(unrelated.env.instructions,[card,'其他角色']);
     assert.notEqual(unrelated.sid,old.sid);
+    const wx=await run({...chat,binding:bindingFor('wx:FriendMessage:103','wechat'),system:[card]});
+    assert.equal(wx.fixedCard,null);
+    const quoted=await run({...chat,system:[`引述「${card}」`,'其他背景']});
+    assert.equal(quoted.fixedCard,null);
+    assert.deepEqual(quoted.env.instructions,[`引述「${card}」`,'其他背景']);
     setCard.run('whale',edited);
-    const next=await run({...base,system:[edited,'新近记忆']});
+    const next=await run({...chat,system:[edited,'新近记忆']});
     assert.equal(next.sid,old.sid);
     assert.equal(next.fixedCard,edited);
     assert.deepEqual(next.env.instructions,['新近记忆']);
     await app.close();
     app=await start(options);
-    const reopened=await run({...base,system:[edited]});
+    const reopened=await run({...chat,system:[edited]});
     assert.equal(reopened.sid,old.sid);
     assert.equal(reopened.fixedCard,edited);
     assert.deepEqual(reopened.env.instructions,[]);
     db.prepare('DELETE FROM personas').run();
-    const fallback=await run({...base,system:[edited,'继续聊']});
+    const fallback=await run({...chat,system:[edited,'继续聊']});
     assert.equal(fallback.sid,old.sid);
     assert.equal(fallback.fixedCard,null);
     assert.deepEqual(fallback.env.instructions,[edited,'继续聊']);

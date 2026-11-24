@@ -14,9 +14,9 @@
 
 ## 固定角色卡
 
-在桥服务设置 `DAFEIYU_DSH_PERSONA_DB` 为宿主机上的 AstrBot `data_v4.db` 路径，并设置 `DAFEIYU_DSH_PERSONA_ID` 为要固定的角色卡 ID。角色仍在 AstrBot 管理。桥服务以只读方式读取角色卡，在普通聊天的系统提示词与角色卡完整匹配时，使用独立的 DSH ACP 进程把角色卡放到系统提示词。此进程的 profile 将 `system-prompt.personaSuffix` 用于固定角色卡。聊天会话继续使用原来的绑定，每轮提示词只移除匹配的角色卡段落。
+在桥服务设置 `DAFEIYU_DSH_PERSONA_DB` 为宿主机上的 AstrBot `data_v4.db` 路径，并设置 `DAFEIYU_DSH_PERSONA_ID` 为要固定的默认角色卡 ID。同目录下需要有 AstrBot 的 `cmd_config.json`。角色仍在 AstrBot 管理。桥服务只读核对 QQ 会话绑定、角色选择和完整角色卡，再使用独立的 DSH ACP 进程把角色卡放到系统提示词。此进程的 profile 将 `system-prompt.personaSuffix` 用于固定角色卡。聊天会话继续使用原来的绑定，每轮提示词只移除匹配的角色卡段落。
 
-保存新角色卡后，下一轮匹配时使用新内容。其他角色、辅助任务和未匹配的请求按原方式发送提示词。旧会话记录保留原内容。
+保存新角色卡后，下一轮匹配时使用新内容。切换期间已有请求占用旧角色进程时，新内容按原方式发送，旧请求结束后再固定。其他角色、辅助任务、含模板变量的角色卡以及配置了会话配置档的部署沿用原方式。旧会话记录保留原内容。
 
 ## 本地中文记忆
 

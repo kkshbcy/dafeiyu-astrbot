@@ -1,5 +1,6 @@
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 function removeCard(instructions, card) {
@@ -19,20 +20,50 @@ function removeCard(instructions, card) {
 export function createFixedPersona(settings,state,connection) {
   if (!settings) return null;
   const profile=join(state,'fixed-persona.patch.json');
-  let db, query, slot, warned=false, closed=false;
-  function readCard() {
+  const settingsFile=join(dirname(settings.database),'cmd_config.json');
+  let db, queries, slot, warned=false, closed=false;
+  function readCard(binding) {
     db??=new DatabaseSync(settings.database,{readOnly:true});
-    query??=db.prepare('SELECT system_prompt FROM personas WHERE persona_id=?');
-    const card=query.get(settings.id)?.system_prompt;
+    queries??={
+      profile:db.prepare("SELECT value FROM preferences WHERE key='abconf_mapping' LIMIT 1"),
+      override:db.prepare("SELECT value FROM preferences WHERE scope='umo' AND scope_id=? AND key='session_service_config' LIMIT 1"),
+      conversations:db.prepare('SELECT user_id, conversation_id, persona_id FROM conversations WHERE platform_id=?'),
+      card:db.prepare('SELECT system_prompt FROM personas WHERE persona_id=?')
+    };
+    const config=JSON.parse(readFileSync(settingsFile,'utf8').replace(/^\uFEFF/,''));
+    const runner=config.agent_runner;
+    if (runner?.runner_type!=='local' || runner.config?.persona?.persona_id!==settings.id) return '';
+    // Let AstrBot supply the full prompt when it owns per-session configuration.
+    const profiles=queries.profile.get();
+    if (profiles && Object.keys(JSON.parse(profiles.value) ?? {}).length) return '';
+    for (const qq of config.platform ?? []) {
+      if (!qq.enable || qq.type!=='aiocqhttp' || !qq.id) continue;
+      for (const row of queries.conversations.iterate(qq.id)) {
+        const scope=row.user_id;
+        if (!scope.startsWith(qq.id+':FriendMessage:') && !scope.startsWith(qq.id+':GroupMessage:')) continue;
+        // Match AstrBot bridge's Python json.dumps default separators.
+        const key=createHash('sha256').update(`[${JSON.stringify(scope)}, ${JSON.stringify(row.conversation_id)}]`).digest('hex');
+        if (key!==binding) continue;
+        if (row.persona_id!=null && row.persona_id!==settings.id) return '';
+        const override=queries.override.get(scope);
+        const persona=override && JSON.parse(override.value)?.persona_id;
+        if (persona && persona!==settings.id) return '';
+        return plainCard();
+      }
+    }
+    return '';
+  }
+  function plainCard() {
+    const card=queries.card.get(settings.id)?.system_prompt;
     // DSH renders deployment prompt templates. Leave cards with variables in AstrBot.
     return typeof card==='string' && !/\{\{|\}\}/.test(card) ? card.replace(/\r\n/g,'\n').trim() : '';
   }
   return {
-    async acquire(system) {
+    async acquire(binding,system) {
       if (closed) return null;
       let selected;
       try {
-        const card=readCard();
+        const card=readCard(binding);
         const instructions=card && removeCard(system,card);
         if (!instructions) return null;
         if (slot?.card!==card) {

@@ -134,12 +134,10 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
             body = json.loads(kwargs["prompt"])
             return SimpleNamespace(completion_text="yes" if "你怎么想的" in body["followups"] else "no")
         self.judge.text_chat.side_effect = from_burst
-        first = asyncio.create_task(self.consume(self.event(Plain("我看完了"))))
-        async with asyncio.timeout(2):
-            while not self.plugin._group_wait_windows:
-                await asyncio.sleep(0.01)
-        self.assertEqual(await self.consume(self.event(Plain("你怎么想的"))), [])
-        self.assertEqual(len(await first), 1)
+        batches = await asyncio.gather(self.consume(self.event(Plain("我看完了"))),
+                                       self.consume(self.event(Plain("你怎么想的"))))
+        self.assertEqual([len(batch) for batch in batches], [0, 1])
+        self.assertEqual(len(self.plugin.qq_turn_window.sent[("qq", "g")]), 1)
         self.judge.text_chat.assert_awaited_once()
 
     async def test_mention_takes_over_earlier_waiting_turn_without_double_reply(self):
@@ -147,12 +145,17 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
         self.plugin.group_wait_window_timeout_ms = 500
         self.plugin._group_wait_window_max_extra = 2
         self.plugin.pending_cache_max_count = 10
-        first = asyncio.create_task(self.consume(self.event(Plain("我看完了"))))
-        async with asyncio.timeout(2):
-            while not self.plugin._group_wait_windows:
-                await asyncio.sleep(0.01)
-        results = await self.consume(self.event(At(qq="11"), Plain("你呢")))
-        self.assertEqual(await first, [])
+        opening = self.event(At(qq="33"), Plain("我看完了"))
+        original_lookup = self.plugin._check_mention_others
+        async def slow_first_lookup(event):
+            if event is opening:
+                await asyncio.sleep(0.2)
+            return await original_lookup(event)
+        self.plugin._check_mention_others = slow_first_lookup
+        self.plugin.qq_turn_window.draw = lambda: 0.0
+        first, results = await asyncio.gather(self.consume(opening),
+                                              self.consume(self.event(At(qq="11"), Plain("你呢"))))
+        self.assertEqual(first, [])
         self.assertEqual(len(results), 1)
         self.assertIn("我看完了", results[0].prompt)
         self.assertIn("你呢", results[0].prompt)

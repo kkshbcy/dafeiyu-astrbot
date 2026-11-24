@@ -121,6 +121,42 @@ def room_key(event):
     return (str(event.get_platform_id()), str(event.get_group_id()))
 
 
+class SpeakerBursts:
+    """Register before asynchronous QQ lookups. The latest event owns the whole burst."""
+    def __init__(self):
+        self.waiting = {}
+
+    async def collect(self, key, item, *, direct, seconds, max_extra, max_users):
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        previous = self.waiting.get(key)
+        if previous and (previous[0] <= now or previous[2].done()):
+            if not previous[2].done():
+                previous[2].set_result(True)
+            self.waiting.pop(key)
+            previous = None
+        if previous:
+            deadline, earlier, done = self.waiting.pop(key)
+            done.set_result(False)
+            items = [*earlier, item]
+        else:
+            items = [item]
+            deadline = now + seconds
+        if direct or len(items) > max_extra or (not previous and len(self.waiting) >= max_users):
+            return items
+        done = loop.create_future()
+        slot = (deadline, items, done)
+        self.waiting[key] = slot
+        try:
+            keep = await asyncio.wait_for(done, max(0.0, deadline - now))
+            return items if keep else None
+        except TimeoutError:
+            return items
+        finally:
+            if self.waiting.get(key) is slot:
+                self.waiting.pop(key)
+
+
 async def decide(window, event, history, text, followups, *, direct, names, other,
                  provider, slots, timeout, probability, seconds, limit):
     if not direct:

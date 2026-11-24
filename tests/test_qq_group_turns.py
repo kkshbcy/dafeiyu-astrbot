@@ -135,3 +135,15 @@ class GroupTurnsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.decide(direct="mention"))[0], "mention")
             self.provider.text_chat.assert_not_awaited()
         self.assertEqual((await queued)[0], "ambient")
+
+    async def test_cancelled_wait_is_released_and_rooms_do_not_merge(self):
+        bursts = turns.SpeakerBursts()
+        options = {"seconds": 1, "max_extra": 3, "max_users": 5}
+        first = asyncio.create_task(bursts.collect(("qq", "a", "user"), "原话", direct=False, **options))
+        await asyncio.sleep(0)
+        self.assertEqual(await bursts.collect(("qq", "b", "user"), "别群", direct=True, **options), ["别群"])
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        self.assertEqual(bursts.waiting, {})
+        self.assertEqual(await bursts.collect(("qq", "a", "user"), "另起", direct=True, **options), ["另起"])

@@ -49,3 +49,13 @@ QQ 消息里只说拍照或画图时，Seedream 5.5 请求使用 1K 档的实际
 只有原消息明确指定一个支持的档位（1K、1.5K、2K）或宽×高时才覆盖默认值。
 应用后可从 AstrBot 的 `Seedream 输出尺寸` 日志查看实际发给火山的尺寸。
 本目录仅包含修改后的文件，按 AGPL-3.0 随本项目一同分发。
+
+## QQ 群聊接话和心情
+
+`group_chat_plus/` 适配 Group Chat Plus V1.2.3.hotfix.2。将 `qq_group_turns.py` 放入已安装插件的根目录，在该目录运行 `patch --batch --fuzz=0 -p1 < /path/to/group_chat_plus_v1.2.3_hotfix2.patch`，再重载这个插件。补丁也校正了该版本私聊子模块引用自带文件时的导入名，便于全新加载。
+
+配置 `qq_addressed_turns=true`，在 `qq_turn_names` 中填她的公开昵称。收话人判断使用 `decision_ai_provider_id` 指定的辅助提供商。当前组合使用 `dsh_judgment`。原生 @ 她或单独引用她时直接进入回复。其他群消息结合最近十条发言和同一人的连续补充判断收话人。判断服务超时后，明确喊她名字的消息仍可在本地识别。
+
+把 `initial_probability` 设为 `0.4`，开启 `enable_reply_density_limit`，将 `reply_density_window_seconds`、`reply_density_max_replies` 分别设为 `300`、`10`。每个群独立计数，一轮里分几条发都算一次。已经发出的回复和正在处理的回复一起用于判断还有没有插话名额。实际发出后开始计时，发送失败释放名额。达到上限时依然可以回答直接找她的人。单独热重载插件保留计数，AstrBot 进程重启后重新计数。
+
+群聊语气参考当前群的发言、她在这个群里已经表现出的心情，以及心境插件配置的作息。心情左右她愿不愿意多聊或答应一个小请求。QQ群的这套规则可通过 `qq_addressed_turns` 关闭。

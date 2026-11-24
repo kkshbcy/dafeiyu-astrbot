@@ -1,0 +1,275 @@
+--- a/main.py
++++ b/main.py
+@@ -270,6 +270,8 @@
+     SmartConcurrentManager,  # 🆕 v1.2.2-hotfix.1: 智能并发合并管理器
+     SystemPromptRewriter,  # 🆕 v1.2.2-hotfix.1: system_prompt 重写增强
+ )
++from . import qq_group_turns
++from astrbot.api.message_components import Reply
+ from .utils.image_description_cache import (
+     ImageDescriptionCache,
+ )  # 🆕 v1.2.0: 图片描述缓存
+@@ -1045,6 +1047,10 @@
+         super().__init__(context)
+         self.context = context
+         self.config = config
++        self.qq_addressed_turns = config.get("qq_addressed_turns", False)
++        self.qq_turn_names = config.get("qq_turn_names", [])
++        self.qq_turn_window = qq_group_turns.ReplyWindow.for_context(context)
++        self.qq_judge_slots = asyncio.Semaphore(2)
+         self._raw_config_dict = self._extract_raw_config_dict(config)
+         self._legacy_cooldown_migration_task = None
+
+@@ -4294,8 +4300,13 @@
+                 return
+
+             # 处理群消息
+-            async for result in self._process_message(event):
+-                yield result
++            try:
++                async for result in self._process_message(event):
++                    yield result
++            finally:
++                claim = event.get_extra("dfy_qq_turn_claim")
++                if claim:
++                    self.qq_turn_window.finish(claim, sent=bool(getattr(event, "_has_send_oper", False)))
+         except Exception as e:
+             logger.error(f"处理群消息时发生错误: {e}", exc_info=True)
+         finally:
+@@ -7768,7 +7779,13 @@
+
+         # 🆕 v1.0.2: 更新情绪状态（如果启用），情绪提示改为在 on_llm_request 中
+         # 追加到 system_prompt，不再注入 user prompt。
+-        if self.mood_enabled and self.mood_tracker:
++        if event.get_extra("dfy_qq_turn"):
++            atmosphere = (self.mood_tracker.get_current_mood(qq_group_turns.room_key(event))
++                          if self.mood_enabled and self.mood_tracker else "平静")
++            phase = qq_group_turns.public_phase(self.context)
++            hint = qq_group_turns.expression_hint(event.get_extra("dfy_qq_turn"), phase, atmosphere)
++            event.set_extra("_group_chat_plus_mood_hint", hint)
++        elif self.mood_enabled and self.mood_tracker:
+             if self.debug_mode:
+                 logger.info("【步骤12.5】更新情绪状态")
+
+@@ -8066,7 +8083,7 @@
+         # 🔧 使用可配置的重复消息检测参数
+         # 🔧 重要：重复检测只拦截发送，不影响后续流程（概率调整、注意力记录等）
+         is_duplicate_blocked = False
+-        if reply_text and not is_provider_request and self.enable_duplicate_filter:
++        if reply_text and not is_provider_request and self.enable_duplicate_filter and not event.get_extra("dfy_qq_turn"):
+             # 获取或初始化该会话的回复缓存
+             if chat_id not in self.recent_replies_cache:
+                 self.recent_replies_cache[chat_id] = []
+@@ -8217,7 +8234,7 @@
+                 logger.info("[主动对话] 已记录AI回复（普通回复）")
+
+         # 🆕 v1.2.1: 记录回复到密度管理器
+-        if self.enable_reply_density_limit:
++        if self.enable_reply_density_limit and not event.get_extra("dfy_qq_turn"):
+             try:
+                 density_chat_key = ProbabilityManager.get_chat_key(
+                     platform_name, is_private, chat_id
+@@ -9367,8 +9384,11 @@
+         if not should_continue:
+             return
+
+-        # 🆕 v1.0.2: 记录消息（用于频率调整统计）
+-        if self.frequency_adjuster_enabled and self.frequency_adjuster:
++        qq_policy = self.qq_addressed_turns and platform_name == "aiocqhttp" and not is_private
++        use_smart_batch = self.concurrent_mode == "smart" and not qq_policy
++        # QQ gathers the same speaker's short burst before one addressedness check.
++        # A smart batch across speakers cannot share a single addressee.
++        if not qq_policy and self.frequency_adjuster_enabled and self.frequency_adjuster:
+             # 使用完整的会话标识，确保不同会话的状态隔离
+             chat_key = ProbabilityManager.get_chat_key(
+                 platform_name, is_private, chat_id
+@@ -9537,11 +9557,29 @@
+         # 步骤2.8: 提前检测@提及信息与候选冷却上下文（轻量操作，便于概率阶段使用）
+         mention_info = await self._check_mention_others(event)
+
++        direct_reason = ""
++        qq_text = ""
++        if qq_policy:
++            chain = event.get_messages() or []
++            mentions = mention_info or {}
++            bot = str(event.get_self_id())
++            quoted = {str(part.sender_id) for part in chain if isinstance(part, Reply) and part.sender_id}
++            other_addressee = bool(mentions.get("has_at_others") or mentions.get("has_at_all") or quoted - {bot})
++            if mentions.get("has_at_ai"):
++                direct_reason = "mention"
++            elif bot in quoted and not other_addressee:
++                direct_reason = "quote"
++            elif poke_info_for_probability and (poke_info_for_probability.get("poke_info") or {}).get("is_poke_bot"):
++                direct_reason = "poke"
++            qq_text = "".join(str(part.text) for part in chain if isinstance(part, Plain)).strip()
++            if qq_text and self.mood_enabled and self.mood_tracker:
++                self.mood_tracker.update_mood_from_context(qq_group_turns.room_key(event), qq_text[:400])
++
+         # 🆕 v1.2.0: 群聊等待窗口拦截
+         # 如果该用户在本群有活跃的等待窗口，根据消息类型和对应的窗口行为模式决定：
+         # - 拦截缓存（intercept）/ 强制结束窗口（force_close/immediate）/ 绕过（bypass）
+         # 具体行为由 at_mode / keyword_mode / poke_mode 配置决定
+-        if self.enable_group_wait_window and self._group_wait_window_max_extra > 0:
++        if not direct_reason and self.enable_group_wait_window and self._group_wait_window_max_extra > 0:
+             _gww_intercepted = await self._maybe_intercept_for_wait_window(
+                 event,
+                 chat_id,
+@@ -9604,7 +9642,7 @@
+             )
+
+         # 步骤3: 概率判断（第一道核心过滤，避免后续耗时处理）
+-        should_process = await self._check_probability_before_processing(
++        should_process = qq_policy or await self._check_probability_before_processing(
+             event,
+             platform_name,
+             is_private,
+@@ -9791,7 +9829,7 @@
+         # 根据消息类型和对应的窗口行为模式，判断是否允许开启窗口
+         _gww_extra_count = 0  # 🔧 等待窗口收集的额外消息数（用于注意力机制补偿）
+         _gww_window_token = 0  # 🔧 窗口令牌（0=无窗口），用于决策AI不回复时精确转换
+-        _gww_can_open = True  # 默认允许开启窗口
++        _gww_can_open = not direct_reason
+         if poke_info_for_probability is not None:
+             _gww_can_open = False  # 戳一戳永远不开窗口（无论 poke_mode 如何设置）
+         elif is_at_message and self.group_wait_window_at_mode in (
+@@ -9957,7 +9995,7 @@
+         arrival_seq, arrival_monotonic = self._ensure_arrival_metadata(event)
+         early_message_id = processing_id
+
+-        if self.concurrent_mode == "smart":
++        if use_smart_batch:
+             await SmartConcurrentManager.register_arrival(
+                 chat_id=chat_id,
+                 processing_id=processing_id,
+@@ -9966,7 +10004,7 @@
+                 arrival_monotonic=arrival_monotonic,
+             )
+
+-        if self.concurrent_mode == "smart" and cached_message_data:
++        if use_smart_batch and cached_message_data:
+             try:
+                 _smart_content = MessageCleaner.clean_message(message_text or "")
+             except Exception:
+@@ -10090,7 +10128,28 @@
+         )
+         _at_all_skip_all = is_at_all_message and self.at_all_message_mode == "skip_all"
+
+-        if _welcome_skip_all or _at_all_skip_all:
++        if qq_policy:
++            buffered = self.cache_manager.get_window_buffered_messages(chat_id) if _gww_window_token else []
++            followups = [
++                row.get("content", "") for row in buffered
++                if row.get("gww_token") == _gww_window_token
++                and str(row.get("sender_id")) == str(event.get_sender_id())
++            ]
++            judge = None
++            if not direct_reason:
++                judge = self.context.get_provider_by_id(self.decision_ai_provider_id)
++            reason, claim = await qq_group_turns.decide(
++                self.qq_turn_window, event, history_messages, qq_text or original_message_text, followups,
++                direct=direct_reason, names=self.qq_turn_names, other=other_addressee, provider=judge, slots=self.qq_judge_slots,
++                timeout=min(self.decision_ai_timeout, 15), probability=self.initial_probability,
++                seconds=self.reply_density_window_seconds,
++                limit=self.reply_density_max_replies if self.enable_reply_density_limit else None,
++            )
++            event.set_extra("dfy_qq_turn", reason)
++            event.set_extra("dfy_qq_turn_claim", claim)
++            should_reply = claim is not None
++            logger.info("[QQ群接话] %s", reason)
++        elif _welcome_skip_all or _at_all_skip_all:
+             should_reply = True
+             if self.debug_mode:
+                 if _welcome_skip_all:
+@@ -10106,7 +10165,7 @@
+             # 🆕 v1.2.0: 传递原始消息文本用于关键词检测
+             # 🆕 Smart 模式：若当前批次已吸收后续消息，则决策AI也要基于同一批次视图判断
+             decision_context = formatted_context
+-            if self.concurrent_mode == "smart":
++            if use_smart_batch:
+                 smart_batch_messages = self._smart_batch_snapshots.get(
+                     early_message_id, []
+                 )
+@@ -10217,7 +10276,7 @@
+                 logger.info("📦 决策AI判断: 不回复此消息，无待缓存数据")
+
+             # Smart 批次下，被当前 anchor 吸收但最终未触发回复的后续消息应回落为普通缓存
+-            if self.concurrent_mode == "smart":
++            if use_smart_batch:
+                 smart_batch_messages = self._smart_batch_snapshots.pop(
+                     early_message_id, []
+                 )
+@@ -10271,7 +10330,7 @@
+         wait_interval = self.concurrent_wait_interval  # 每次循环等待秒数
+
+         for loop_count in range(max_wait_loops):
+-            if self.concurrent_mode == "smart":
++            if use_smart_batch:
+                 consumed = await SmartConcurrentManager.is_consumed(message_id)
+                 if consumed:
+                     anchor_processing_id = await SmartConcurrentManager.get_consumer(
+@@ -10485,7 +10544,7 @@
+                 logger.info("[主动对话] 读空气AI判定确认回复，已重置主动对话计时器")
+
+             # 🆕 v1.2.1: 记录回复到密度管理器（主动对话确认回复）
+-            if self.enable_reply_density_limit:
++            if not qq_policy and self.enable_reply_density_limit:
+                 try:
+                     await ReplyDensityManager.record_reply(chat_key)
+                 except Exception as e:
+@@ -10605,7 +10664,7 @@
+         try:
+             smart_batch_reply_hint = ""
+             # 🆕 Smart 模式：回复阶段与决策阶段使用同一批次视图，避免顺序与主次不一致
+-            if self.concurrent_mode == "smart":
++            if use_smart_batch:
+                 smart_batch_messages = self._smart_batch_snapshots.get(message_id, [])
+                 if smart_batch_messages:
+                     try:
+@@ -10668,7 +10727,7 @@
+                     self._chat_flow_owners.pop(chat_id, None)
+
+             # 🆕 Smart模式清理——确保消息从待处理池移除，避免异常路径残留
+-            if self.concurrent_mode == "smart":
++            if use_smart_batch:
+                 await SmartConcurrentManager.remove_self(chat_id, message_id)
+
+     @filter.on_llm_request(priority=-1)
+@@ -11258,7 +11317,7 @@
+
+             # 🔧 重要：重复检测必须在错字模拟之前执行，基于原始内容检测
+             # 清理过期缓存并进行重复检查（使用可配置参数）
+-            if self.enable_duplicate_filter:
++            if self.enable_duplicate_filter and not event.get_extra("dfy_qq_turn"):
+                 now_ts = time.time()
+                 if chat_id not in self.recent_replies_cache:
+                     self.recent_replies_cache[chat_id] = []
+--- a/_conf_schema.json
++++ b/_conf_schema.json
+@@ -1,4 +1,16 @@
+ {
++    "qq_addressed_turns": {
++        "description": "QQ群按收话人决定接话",
++        "type": "bool",
++        "hint": "直接点名或承接她的话必回；其他发言按初始概率抽一次，使用密度窗口和上限。",
++        "default": false
++    },
++    "qq_turn_names": {
++        "description": "群友平常怎么称呼她",
++        "type": "list",
++        "hint": "供收话人判断参考，出现在第三人称讨论里也可以保持安静。",
++        "default": []
++    },
+     "_web_panel_section_header": {
+         "description": "═══════════════ 🌐 Web 配置面板 ═══════════════",
+         "type": "string",
+--- a/private_chat/private_chat_utils/private_chat_context_manager.py
++++ b/private_chat/private_chat_utils/private_chat_context_manager.py
+@@ -20,7 +20,7 @@
+ import json
+ import asyncio
+ from datetime import datetime
+-from ._session_guard import guard_session
++from .private_chat_session_guard import guard_session
+
+ # 导入群聊 ContextManager 的历史截止时间戳机制（共享同一份持久化数据）
+ from ...utils.context_manager import ContextManager as _GroupContextManager

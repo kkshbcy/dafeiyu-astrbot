@@ -1,0 +1,8 @@
+{
+  "owner_private_scopes": {
+    "description": "主人私聊的完整会话标识",
+    "hint": "每项为 平台实例ID:FriendMessage:发件人ID。群聊始终只有公开权限。",
+    "type": "list",
+    "default": []
+  }
+}

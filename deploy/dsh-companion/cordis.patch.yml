@@ -1,0 +1,48 @@
+# Applied only to the bot's official ACP profile. The human Web profile is independent.
+- id: acp
+  config:
+    provider: deepseek-account
+    model: deepseek-flash
+- id: system-prompt
+  config:
+    personaPrefix: >-
+      你在 AstrBot 中与人交谈。每一轮采用应用传入的角色设定和动态心境，
+      按对话所在范围使用记忆。工具执行结果来自 AstrBot 的真实回执。
+- id: tool-plugin-manager
+  disabled: true
+- id: tool-working-directory
+  disabled: true
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: agent-instructions
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: image-offload
+  disabled: true

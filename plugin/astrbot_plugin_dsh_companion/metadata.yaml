@@ -1,0 +1,6 @@
+name: astrbot_plugin_dsh_companion
+display_name: 大肥鱼 · 官方 DeepSeek Harness
+desc: 把当轮人格、心境、记忆和已授权的工具交给官方 DSH ACP，按会话续聊。
+author: kkshbcy
+version: v0.1.0
+repo: https://github.com/kkshbcy/dafeiyu-astrbot

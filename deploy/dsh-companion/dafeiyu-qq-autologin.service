@@ -1,0 +1,15 @@
+[Unit]
+Description=Dafeiyu QQ automatic login after a confirmed disconnect
+After=dafeiyu-napcat.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env node %h/dafeiyu-live/ops/qq-autologin.mjs
+StateDirectory=dafeiyu-qq-autologin
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

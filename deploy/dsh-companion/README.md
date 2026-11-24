@@ -35,3 +35,9 @@
 ## 离线核验
 
 运行 `node --test tests/dsh-companion.test.mjs` 和 `python -m unittest discover -s tests -p test_dsh_companion.py`。在 4.29.4 镜像内，使用空数据目录、`--network none` 和 `PYTHONPATH=仓库根目录` 运行 `python tests/dsh_provider_fat.py` 可核对真实 AstrBot SDK 的消息钩子、工具和重复消息处理。这些检查使用模拟的 DSH 回复。
+
+### QQ 掉线自动登录
+
+NapCat WebUI 的「登录配置 → 快速登录QQ」填机器人账号，启动时会用本机留存的 QQ 登录凭证尝试上线。将同目录的 `qq-autologin.mjs` 放进 `~/dafeiyu-live/ops/`，将 `dafeiyu-qq-autologin.service` 安装到用户 systemd 单元目录。该单元需要 Node.js 22 或以上在服务的 PATH 中。用 nvm 安装的主机可给此单元单独设置 PATH。执行 `systemctl --user daemon-reload` 和 `systemctl --user enable --now dafeiyu-qq-autologin.service` 即可启动守护。用户服务需启用 linger 才能在登出 SSH 后继续运行并随机器启动。
+
+守护每 30 秒读取一次本机 NapCat 的账号和在线状态。已配置的账号连续两次明确离线时，仅重新启动运行中的 `dafeiyu-napcat.service`。同一账号两次恢复至少间隔 10 分钟。刚启动守护若尚未见过上线，会先宽限 90 秒。会话仍明确离线时会在冷却结束后重试；等待扫码或设备验证、尚未建立账号会话时会保留登录页面。聊天静默和 WebUI 暂时无法访问都不会触发重启。可用 `journalctl --user -u dafeiyu-qq-autologin.service` 查看动作，或用 `systemctl --user disable --now dafeiyu-qq-autologin.service` 单独停用守护。

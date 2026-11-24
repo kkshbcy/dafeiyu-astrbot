@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.provider.entities import ProviderRequest
@@ -15,6 +15,44 @@ import json
 
 
 class EntryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_qq_identity_prefix_and_elliptical_question_use_task_records(self):
+        from datetime import datetime
+        from plugin.astrbot_plugin_dsh_companion.qq_images import QQImageDelivery
+
+        plugin = object.__new__(Companion)
+        plugin.config = {"owner_private_scopes": []}
+        scope = "qq:FriendMessage:101"
+        event = SimpleNamespace(
+            message_str="[主人的朋友 来客(101)] 还没有吗",
+            message_obj=SimpleNamespace(message_str="还没有吗", message_id="msg1", raw_message={}),
+            get_platform_name=lambda: "aiocqhttp", get_platform_id=lambda: "qq", get_self_id=lambda: "999",
+            get_sender_id=lambda: "101", get_group_id=lambda: "", unified_msg_origin=scope,
+        )
+        records = [SimpleNamespace(
+            task_id="second", status="failed", sender_id="101", source="LLM工具",
+            created_at=datetime.now(), delivered=False, result_paths=[], delivered_paths=[], qq_image_receipts={},
+        )]
+        manager = SimpleNamespace(list_generation_tasks=lambda **kwargs: records if kwargs["unified_msg_origin"] == scope else [])
+        with tempfile.TemporaryDirectory() as tmp:
+            delivery = QQImageDelivery(None, manager, tmp, tmp)
+            star = SimpleNamespace(activated=True, star_cls=SimpleNamespace(qq_image_delivery=delivery))
+            plugin.context = SimpleNamespace(get_registered_star=lambda name: star)
+            req = ProviderRequest(prompt="带聊天历史的提示词", contexts=[
+                {"role": "assistant", "content": [{"type": "text", "text": "等自画像画好就发。"}]},
+            ])
+            req.conversation = SimpleNamespace(cid="c")
+            await plugin.bind_turn(event, req)
+            provider = Harness({"id": "fat", "type": "dsh_companion_acp"}, {})
+            with patch("asyncio.open_unix_connection", side_effect=AssertionError("进度查询不应提交到 DSH")):
+                answer = await provider.text_chat(prompt=req.prompt, session_id=req.session_id)
+            self.assertIn("失败", answer.completion_text)
+            self.assertNotIn("排队", answer.completion_text)
+
+            event.message_obj.message_str = "刚刚忙了半天，那幅大作到底怎么样啦"
+            await plugin.bind_turn(event, req)
+            self.assertIn("最近一次", req.system_prompt)
+            self.assertIn("失败", req.system_prompt)
+
     async def test_tool_loop_carries_the_actual_receipt_back_to_the_model(self):
         from astrbot.core.agent.hooks import BaseAgentRunHooks
         from astrbot.core.agent.run_context import ContextWrapper
@@ -46,7 +84,7 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
                     plugin=object.__new__(Companion)
                     plugin.config={"owner_private_scopes":[]}
                     plugin._new_conversation_lock=asyncio.Lock()
-                    plugin.context=SimpleNamespace(conversation_manager=SimpleNamespace(
+                    plugin.context=SimpleNamespace(get_registered_star=lambda _: None, conversation_manager=SimpleNamespace(
                         get_curr_conversation_id=AsyncMock(return_value="fat-cid")))
                     event=SimpleNamespace(unified_msg_origin="test:GroupMessage:room",message_obj=SimpleNamespace(
                         message_id="message",raw_message={"post_type":"message","sub_type":"normal"}),
@@ -111,7 +149,7 @@ class EntryTest(unittest.IsolatedAsyncioTestCase):
             plugin._new_conversation_lock=asyncio.Lock()
             manager=SimpleNamespace(get_curr_conversation_id=AsyncMock(return_value=None),
                                     new_conversation=AsyncMock(return_value="current-cid"))
-            plugin.context=SimpleNamespace(conversation_manager=manager)
+            plugin.context=SimpleNamespace(conversation_manager=manager, get_registered_star=lambda _: None)
             scope="testqq:FriendMessage:test-actor"
             plugin.config={"owner_private_scopes":[scope]}
             plugin.library=Library(tmp)

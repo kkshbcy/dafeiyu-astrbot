@@ -1,7 +1,9 @@
 import asyncio
+import base64
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -17,8 +19,15 @@ class QQImageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.temp = Path(temp.name) / "temp"
         self.originals.mkdir()
         self.temp.mkdir()
+        self.status = AsyncMock(return_value={"online": True, "good": True})
         self.send = AsyncMock(return_value={"message_id": -123})
-        platform = SimpleNamespace(bot=SimpleNamespace(call_action=self.send), meta=lambda: SimpleNamespace(name="aiocqhttp"))
+
+        async def call_action(action, **kwargs):
+            if action == "get_status":
+                return await self.status(**kwargs)
+            return await self.send(action, **kwargs)
+
+        platform = SimpleNamespace(bot=SimpleNamespace(call_action=call_action), meta=lambda: SimpleNamespace(name="aiocqhttp"))
         self.context = SimpleNamespace(get_platform_inst=lambda _: platform)
         self.records = []
         self.manager = SimpleNamespace(
@@ -43,7 +52,7 @@ class QQImageDeliveryTest(unittest.IsolatedAsyncioTestCase):
             os.link(path, self.temp / path.name)
             paths.append(str(path))
         record = SimpleNamespace(
-            task_id=name, status=status, source="LLM工具", error="",
+            task_id=name, status=status, source="LLM工具", error="", created_at=datetime.now(),
             sender_id=event.get_sender_id(), unified_msg_origin=event.unified_msg_origin,
             result_paths=paths, delivered_paths=[], delivered=False, qq_image_receipts={},
         )
@@ -131,6 +140,38 @@ class QQImageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.delivery.retry(event))
         self.assertEqual(newest.qq_image_receipts, {})
 
+    def test_short_followup_after_image_turn_uses_actual_states(self):
+        event = self.event()
+        self.record(event, "portrait")
+        self.record(event, "second", status="failed", count=0)
+        history = [
+            {"role": "assistant", "tool_calls": [{"function": {"name": "generate_image"}}]},
+            {"role": "tool", "content": "生图任务已提交"},
+            {"role": "assistant", "content": [{"type": "text", "text": "我在等它出来。"}]},
+        ]
+        for text in ("还没有吗", "还没好吗？", "好了没呀", "有了吗？"):
+            with self.subTest(text=text):
+                answer = self.delivery.status(event, text, contexts=history)
+                self.assertIn("失败", answer)
+                self.assertIn("补发", answer)
+                self.assertNotIn("排队", answer)
+        # A genuine topic change takes precedence over an older drawing.
+        history += [{"role": "user", "content": "我的快递到了吗？"},
+                    {"role": "assistant", "content": "我刚帮你看了物流。"}]
+        self.assertIsNone(self.delivery.status(event, "还没有吗", contexts=history))
+        self.send.assert_not_awaited()
+
+    def test_free_form_followup_can_use_scoped_state_after_original_was_delivered(self):
+        event = self.event()
+        old = self.record(event, "portrait")
+        self.record_receipt(old.task_id, old.result_paths[0], 123)
+        self.record(event, "again", status="failed", count=0)
+        summary = self.delivery.chat_context(event)
+        self.assertIn("失败", summary)
+        self.assertIn("已经发", summary)
+        self.assertNotIn(str(self.originals), summary)
+        self.assertFalse(self.delivery.chat_context(self.event("qq:GroupMessage:202", group="202")))
+
     async def test_connection_failure_and_outside_paths_do_not_delete(self):
         event = self.event()
         record = self.record(event)
@@ -146,6 +187,30 @@ class QQImageDeliveryTest(unittest.IsolatedAsyncioTestCase):
         await self.delivery.deliver(record, qq_target(event))
         self.send.assert_not_awaited()
         self.assertTrue(outside.exists())
+
+    async def test_offline_account_keeps_original_and_retry_sends_same_bytes_after_login(self):
+        event = self.event()
+        record = self.record(event)
+        path, = record.result_paths
+        original = Path(path).read_bytes()
+        self.status.return_value = {"online": False, "good": True}
+        await self.delivery.deliver(record, qq_target(event))
+        self.status.assert_awaited_once_with(self_id="999")
+        self.send.assert_not_awaited()
+        self.assertFalse(record.delivered)
+        self.assertEqual(self.exists(path), (True, True))
+
+        self.status.return_value = {"online": True, "good": True}
+        async def ack(action, **kwargs):
+            payload = kwargs["message"][0]["data"]["file"].removeprefix("base64://")
+            self.assertEqual(base64.b64decode(payload), original)
+            self.assertEqual(self.exists(path), (True, True))
+            return {"message_id": 123}
+        self.send.side_effect = ack
+        self.assertIsNone(await self.delivery.retry(event))
+        self.send.assert_awaited_once()
+        self.assertTrue(record.delivered)
+        self.assertEqual(self.exists(path), (False, False))
 
     async def test_cleanup_replays_confirmed_files_without_resend(self):
         event = self.event()

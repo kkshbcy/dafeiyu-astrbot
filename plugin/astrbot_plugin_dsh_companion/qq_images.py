@@ -15,6 +15,15 @@ FOLLOWUP = re.compile(
     r"[？?。！!～~ ]*"
 )
 EXPLICIT_STATUS = re.compile(r"(?:查(?:一下|下)?|看看)?(?:生图|画图|自画像|图片)(?:的)?进度[？?。！! ]*")
+SHORT_FOLLOWUP = re.compile(
+    r"(?:还没(?:有|好|收到)?|(?:已经)?好(?:了|了没|了没有|没)|有了|怎么样了|进度如何)"
+    r"[了嘛吗呢呀啊么吧]*[？?。！!～~… ]*"
+)
+IMAGE_TOPIC = re.compile(r"自画像|生图|画一张|画好了?|在画|那张图|图片|拿到图|补发.*图|ImageGenerationTask")
+
+
+class QQAccountOffline(ConnectionError):
+    """NapCat is connected to AstrBot but its QQ account is signed out."""
 
 
 @dataclass(frozen=True)
@@ -30,6 +39,9 @@ class QQTarget:
         adapter = context.get_platform_inst(self.platform)
         if not adapter or adapter.meta().name != "aiocqhttp":
             raise RuntimeError("QQ adapter unavailable")
+        status = await adapter.bot.call_action("get_status", self_id=self.account)
+        if isinstance(status, dict) and status.get("online") is False:
+            raise QQAccountOffline
         return await adapter.bot.call_action(
             f"send_{self.kind}_msg",
             self_id=self.account,
@@ -59,7 +71,25 @@ def qq_target(event):
 
 
 def is_image_followup(text):
-    return bool(FOLLOWUP.fullmatch(text.strip()) or EXPLICIT_STATUS.fullmatch(text.strip()))
+    text = text.strip()
+    return bool(FOLLOWUP.fullmatch(text) or EXPLICIT_STATUS.fullmatch(text) or SHORT_FOLLOWUP.fullmatch(text))
+
+
+def last_turn_about_images(contexts):
+    """Look only at the preceding exchange. Older drawings do not own later topics."""
+    for message in reversed((contexts or [])[-6:]):
+        if not isinstance(message, dict) or message.get("role") not in {"assistant", "tool", "user"}:
+            continue
+        if any(c.get("function", {}).get("name") == "generate_image" for c in message.get("tool_calls") or []):
+            return True
+        content = message.get("content")
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+        if isinstance(content, str) and IMAGE_TOPIC.search(content[-400:]):
+            return True
+        if message.get("role") == "user":
+            break
+    return False
 
 
 class QQImageDelivery:
@@ -106,35 +136,56 @@ class QQImageDelivery:
         return any(path and path.is_file()
                    for path in (self._local_path(record, p) for p in self._pending(record)))
 
-    def status(self, event, text):
+    def status(self, event, text, *, contexts=()):
         text = text.strip()
         if not is_image_followup(text):
             return None
         records = self._matching(qq_target(event))
+        if SHORT_FOLLOWUP.fullmatch(text) and not last_turn_about_images(contexts):
+            return None
         if not records:
             if EXPLICIT_STATUS.fullmatch(text):
                 return "我没找到你在这个聊天里提交的生图任务。"
             return None
         latest = records[0]
+        answer = "上一张" + self._state(latest)
+        if latest.status == "failed":
+            older = next((r for r in records[1:] if self._can_retry(r)), None)
+            if older is None and len(records) > 1 and records[1].delivered:
+                older = records[1]
+            if older:
+                answer += "更早那一张" + self._state(older)
+        return answer
+
+    def chat_context(self, event):
+        records = self._matching(qq_target(event))
+        if not records:
+            return ""
+        lines = []
+        for label, record in zip(("最近一次", "前一次"), records):
+            stamp = record.created_at.strftime("%m-%d %H:%M")
+            lines.append(f"{label}（{stamp}）{self._state(record)}")
+        return ("仅在对方谈及生图时参考当前会话中对方的真实任务记录。"
+                "询问进度或表示没收到图片时，以这些记录为准。只有明确要新作或改画才提交新图。\n"
+                + "\n".join(lines))
+
+    def _state(self, latest):
         if latest.status in {"queued", "running", "cancelling", "cancelled"}:
             return {
-                "queued": "上一张还在排队，画好会发到这里。",
-                "running": "上一张还在画，画好会发到这里。",
-                "cancelling": "上一张正在取消。",
-                "cancelled": "上一张已经取消了。",
+                "queued": "还在排队，画好会发到这里。",
+                "running": "还在画，画好会发到这里。",
+                "cancelling": "正在取消。",
+                "cancelled": "已经取消了。",
             }[latest.status]
         if latest.status == "failed":
-            message = "上一张生成失败了。"
-            if any(self._can_retry(r) for r in records[1:]):
-                message += "更早有画好但没发完的图，发「/补发生图」可以补发。"
-            return message
+            return "生成失败了。"
         if latest.task_id in self.in_flight:
-            return "上一张画好了，正在发到这里。"
+            return "画好了，正在发到这里。"
         if self._can_retry(latest):
-            return "上一张画好了，还有图片没发成功。发「/补发生图」可以补发。"
+            return "画好了，还有图没收到 QQ 发送回执。发「/补发生图」可以补发。"
         if self._pending(latest):
-            return "上一张画好了，但服务器上找不到可补发的文件。"
-        return "上一张已经发到这个聊天里了。" if latest.delivered else "上一张没有可发送的图片。"
+            return "画好了，但服务器上找不到可补发的文件。"
+        return "已经发到这个聊天里了。" if latest.delivered else "没有可发送的图片。"
 
     async def deliver(self, record, target):
         if (target is None or target.origin != record.unified_msg_origin
@@ -158,6 +209,9 @@ class QQImageDelivery:
                     if type(message_id) is not int or message_id == 0:
                         raise ValueError("Missing OneBot message_id")
                     self.manager.record_qq_image_receipt(record.task_id, raw_path, message_id)
+                except QQAccountOffline:
+                    logger.warning("生图 %s 的机器人 QQ 已离线，原图留待重新登录后补发", record.task_id)
+                    break
                 except Exception as exc:
                     # OneBot errors may contain a full payload or recipient data.
                     logger.warning("生图 %s 的 QQ 投递未确认，留图供补发（%s）", record.task_id, type(exc).__name__)

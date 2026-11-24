@@ -143,11 +143,16 @@ class Companion(Star):
         if platform not in {"aiocqhttp", "wechat_native"}:
             return
         scope = event.unified_msg_origin
-        text = event.message_str if platform == "aiocqhttp" else ""
+        # face_convert prepends a nickname to event.message_str before this hook.
+        # The adapter retains the sender's original text separately.
+        text = (getattr(event.message_obj, "message_str", event.message_str) or "") if platform == "aiocqhttp" else ""
         image_followup = is_image_followup(text)
         image_status = None
-        if image_followup and (delivery := self.image_delivery()):
-            image_status = delivery.status(event, text)
+        if platform == "aiocqhttp" and (delivery := self.image_delivery()):
+            if image_followup:
+                image_status = delivery.status(event, text, contexts=req.contexts)
+            if not image_status and (facts := delivery.chat_context(event)):
+                req.system_prompt = (req.system_prompt or "") + "\n" + facts
         conversation = getattr(req.conversation, "cid", None)
         if not conversation:
             # Group Chat Plus submits its own history without a Conversation object.

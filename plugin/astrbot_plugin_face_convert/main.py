@@ -826,8 +826,45 @@ class FaceConvertPlugin(Star):
             text = text.replace(f"\x00{index}\x00", value)
         return text
 
-    @staticmethod
-    def _normalize_punctuation(text: str) -> str:
+    _CODE_REGION = re.compile(r"(```[\s\S]*?(?:```|\Z)|``[^\n]*?``|`[^`\n]*`)")
+    _QUOTE_REQUEST = re.compile(
+        r"(?:保留|加|带|套|用)[^，。！？\n]{0,6}引号|引号(?:包|标)|"
+        r"(?:不要|别)[^，。！？\n]{0,4}(?:删|去掉|移除|取消)[^，。！？\n]{0,5}引号|"
+        r"原[文话句样]|引用|逐字|照[抄录]|摘[抄录]|台词|名[句言]|"
+        r"怎么说|如何说|说[过了]什么|哪(?:一)?句话|背(?:诵|一[下遍首])|念一[遍首]|"
+        r"\b(?:quote|quotation|verbatim)\b", re.IGNORECASE
+    )
+    _NO_OUTER_QUOTE = re.compile(r"(?:不要|不用|不必|别|无需)[^，。！？\n]{0,12}(?:加|带|套|用)[^，。！？\n]{0,6}引号")
+
+    @classmethod
+    def _has_qq_dialogue_wrapper(cls, text: str, event: AstrMessageEvent) -> bool:
+        """识别模型把整条普通 QQ 回复写成台词的情况。"""
+        opening, closing = text[:1], text[-1:]
+        if (opening, closing) not in {("「", "」"), ("“", "”")}:
+            return False
+        platform = getattr(event, "get_platform_name", None)
+        if not platform or platform() != "aiocqhttp":
+            return False
+        body = text[1:-1].strip()
+        if not body or cls.NO_REPLY_RE.fullmatch(body):
+            return False
+        if (body[0], body[-1]) in {("「", "」"), ("“", "”"), ("{", "}"), ("[", "]")}:
+            return False
+        prompt = getattr(event, "message_str", "") or ""
+        if cls._QUOTE_REQUEST.search(prompt) and not cls._NO_OUTER_QUOTE.search(prompt):
+            return False
+        depth = 1
+        for char in cls._CODE_REGION.sub("", body):
+            if char == opening:
+                depth += 1
+            elif char == closing:
+                depth -= 1
+                if depth == 0:  # 第一段引文已经结束，末尾引号属于另一段。
+                    return False
+        return depth == 1
+
+    @classmethod
+    def _normalize_punctuation(cls, text: str) -> str:
         """把「」换成“”，并纠正“顿号当逗号用”的高频写法。
 
         只处理低风险场景：顿号后面直接跟“也/就/但/所以/或者”这类分句连接词。
@@ -842,11 +879,11 @@ class FaceConvertPlugin(Star):
                 return segment
             return _PUNCT_DUNHAO_CLAUSE_RE.sub("，", segment)
 
-        # ``` 代码块原样保留
-        segments = text.split("```")
+        # 代码中的引号是原文。只规范代码片段之间的中文。
+        segments = cls._CODE_REGION.split(text)
         for i in range(0, len(segments), 2):
             segments[i] = fix(segments[i])
-        return "```".join(segments)
+        return "".join(segments)
 
     _LIST_SENTENCE_END = ("。", "！", "？", "!", "?", "…", "~", "～")
 
@@ -992,6 +1029,9 @@ class FaceConvertPlugin(Star):
             if scrubbed != cleaned:
                 cleaned = scrubbed
                 logger.info("[face_convert] 已清扫 meta 口癖")
+            cleaned = cleaned.strip()
+            if self._has_qq_dialogue_wrapper(cleaned, event):
+                cleaned = cleaned[1:-1].strip()
             normalized = self._normalize_punctuation(cleaned)
             if normalized != cleaned:
                 cleaned = normalized
@@ -1051,6 +1091,14 @@ class FaceConvertPlugin(Star):
             c for c in result.chain if isinstance(c, Plain) and c.text
         ]
         joined = "".join(c.text for c in plain_comps)
+        if self._has_qq_dialogue_wrapper(joined.strip(), event) and all(isinstance(c, Plain) for c in result.chain):
+            # 流式/工具回复可能跳过草稿钩子。只动两端，保留原气泡边界。
+            visible = [c for c in plain_comps if c.text.strip()]
+            visible[0].text = visible[0].text.lstrip()[1:].lstrip()
+            visible[-1].text = visible[-1].text.rstrip()[:-1].rstrip()
+            result.chain = [c for c in result.chain if c.text.strip()]
+            plain_comps = result.chain
+            joined = "".join(c.text for c in plain_comps)
         if (
             plain_comps
             and len(plain_comps) == len(result.chain)

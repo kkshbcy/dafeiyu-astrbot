@@ -201,6 +201,71 @@ class _Resp:
 
 
 plugin = mod.FaceConvertPlugin(None)
+
+
+class _ChatEvent(_Event):
+    def __init__(self, prompt, group=False, platform="aiocqhttp"):
+        self.message_str = prompt
+        self.group = group
+        self.platform = platform
+
+    def get_group_id(self):
+        return "room" if self.group else ""
+
+    def get_platform_name(self):
+        return self.platform
+
+
+for group in (False, True):
+    for prompt, raw, expected in (
+        ("我去休息了", "「好呀。醒了再聊。」", "好呀。醒了再聊。"),
+        ("晚安", "“晚安”", "晚安"),
+        ("别给整句话加引号", "“好呀。”", "好呀。"),
+        ("去掉整句话外面的引号", "“好呀。”", "好呀。"),
+        ("不要去掉引号", "“好呀。”", "“好呀。”"),
+        ("然后呢", "“她说‘明天见’，我记下了。”", "她说‘明天见’，我记下了。"),
+        ("然后呢", "“她说“明天见”，我记下了。”", "她说“明天见”，我记下了。"),
+        ("然后呢", "“甲。”“乙。”", "“甲。”“乙。”"),
+        ("然后呢", "她说“明天见”。", "她说“明天见”。"),
+        ("逐字引用原文", "“故人西辞黄鹤楼。”", "“故人西辞黄鹤楼。”"),
+        ("那位作者当时是怎么说的？", "“明日复明日。”", "“明日复明日。”"),
+        ("她说了什么？", "“再见。”", "“再见。”"),
+        ("背一下这首诗", "“明日复明日。”", "“明日复明日。”"),
+        ("怎么弄", "“请运行 `print('」')`，再看结果。”", "请运行 `print('」')`，再看结果。"),
+        ("给个例子", '“可以这样写。\n```python\nprint("「」")\n```\n试试看。”',
+         '可以这样写。\n```python\nprint("「」")\n```\n试试看。'),
+        ("写段代码", '```json\n"你好"\n```', '```json\n"你好"\n```'),
+        ("解释静默标记", "“[NO_REPLY]”", "“[NO_REPLY]”"),
+    ):
+        event = _ChatEvent(prompt, group)
+        response = _Resp(raw)
+        asyncio.run(plugin.scrub_drafts(event, response))
+        check(f"QQ 草稿 group={group} {raw}", response.completion_text == expected, repr(response.completion_text))
+        # 工具循环也可能直接走发送关口，跳过草稿钩子。
+        result = types.SimpleNamespace(chain=[_Plain(raw)], is_llm_result=lambda: True)
+        event.get_result = lambda: result
+        asyncio.run(plugin.convert_faces(event))
+        actual = "".join(c.text for c in result.chain)
+        check(f"QQ 出站 group={group} {raw}", actual == expected, repr(actual))
+
+other = _Resp("“晚安”")
+asyncio.run(plugin.scrub_drafts(_ChatEvent("晚安", platform="wechat_native"), other))
+check("微信沿用原有格式", other.completion_text == "“晚安”")
+
+for raw_parts, expected_parts in (
+    (["“好呀。", "明天见。”"], ["好呀。", "明天见。"]),
+    (["“甲。”", "“乙。”"], ["“甲。”", "“乙。”"]),
+    (["“", "晚安", "”"], ["晚安"]),
+    (["", "“", "", "晚安", "”", ""], ["晚安"]),
+    (["“”"], ["“”"]),
+):
+    event = _ChatEvent("晚安")
+    result = types.SimpleNamespace(chain=[_Plain(s) for s in raw_parts], is_llm_result=lambda: True)
+    event.get_result = lambda: result
+    asyncio.run(plugin.convert_faces(event))
+    asyncio.run(plugin.convert_faces(event))
+    check("QQ 分段和重复处理 " + repr(raw_parts), [c.text for c in result.chain] == expected_parts)
+
 for src in (
     "((a+b)) 是合法表达式",
     "结果是 ((a+b))*c。",

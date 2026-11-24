@@ -43,7 +43,7 @@ export async function start({state,socket,command,args,deadline=160000}) {
     let release;
     const queued=new Promise(r=>{release=r;});
     if(input.binding) busy.set(input.binding,queued);
-    let acp,id,path,cancel,failed=false,admitted=false;
+    let acp,id,path,cancel,failed=false,admitted=false,opened=false;
     try {
       if(previous) await previous;
       signal.throwIfAborted();
@@ -60,12 +60,16 @@ export async function start({state,socket,command,args,deadline=160000}) {
       }
       const sessionArgs={cwd,mcpServers:servers};
       id=input.binding ? lookup.get(input.binding)?.s : undefined;
-      const resume=Boolean(id);
-      if(resume) await acp.request('session/resume',{sessionId:id,...sessionArgs});
-      else {
+      let resume=Boolean(id);
+      if(resume) {
+        try { await acp.request('session/resume',{sessionId:id,...sessionArgs}); }
+        catch(error) { if(!error.sessionMissing)throw error; resume=false; }
+      }
+      if(!resume) {
         id=(await acp.request('session/new',sessionArgs))?.sessionId;
         if(typeof id!=='string'||!id) throw new Error('DSH session unavailable');
       }
+      opened=true;
       signal.throwIfAborted();
       const texts=[],proposals=new Map(),finished=new Set();
       acp.turns.set(id,update=>{
@@ -94,7 +98,7 @@ export async function start({state,socket,command,args,deadline=160000}) {
     }catch(e){failed=true;throw e;}
     finally{
       if(cancel)signal.removeEventListener('abort',cancel);
-      if(id&&acp){
+      if(opened&&acp){
         acp.turns.delete(id);
         if(failed)acp.send({method:'session/cancel',params:{sessionId:id}});
         try{await acp.request('session/close',{sessionId:id},8000);}catch{acp.stop();}

@@ -46,3 +46,5 @@
   disabled: true
 - id: image-offload
   disabled: true
+- id: plan-mode
+  disabled: true

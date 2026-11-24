@@ -1,0 +1,12 @@
+--- a/aiocqhttp_platform_adapter.py
++++ b/aiocqhttp_platform_adapter.py
+@@ -116,0 +117,3 @@
++        elif session.session_id.startswith("qq-temp."):
++            # Storage identity includes the temporary source. OneBot delivery uses the sender.
++            session_id = session.session_id.rsplit(".", 1)[-1]
+@@ -226,0 +230,5 @@
++
++        if abm.type == MessageType.FRIEND_MESSAGE and event.get("sub_type") != "friend":
++            source = event.get("group_id") or event.sender.get("group_id") or event.get("temp_source")
++            source = str(source) if str(source).isdigit() else "unknown"
++            abm.session_id = f"qq-temp.{source}.{abm.sender.user_id}"

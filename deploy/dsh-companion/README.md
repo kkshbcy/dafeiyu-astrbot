@@ -9,6 +9,7 @@
 - 将套接字所在目录只读挂到 AstrBot 的 `/run/dafeiyu-dsh`，套接字名为 `chat.sock`。两个进程需要能以同一 UID 访问此套接字。DSH 账号登录资料保留在宿主机。模型选择的工具由 AstrBot 用原消息身份执行。DSH ACP profile 关闭宿主机文件、Shell、工作流及子代理工具。
 - 框架补丁 `deploy/patches/respond_stage.py` 的原版用于 4.29.0。部署 4.29.4 时，在补丁暂存目录对副本应用 `respond-4.29.4.patch`，以保留新版回复流水线的逻辑。其余三个大肥鱼补丁沿用原件。
 - 在桥插件的 `owner_private_scopes` 填写实际主人私聊的完整 UMO。QQ 和微信分别绑定。私有阅读进度和工作笔记只对已绑定的私聊开放。把 UTF-8 文本、Markdown 或 PDF 放入 `data/plugin_data/astrbot_plugin_dsh_companion/books/` 可供主人调用书架和分段阅读工具。
+- 对 AstrBot 4.29.4 的 `astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py` 副本运行 `patch -p1 < qq-private-scope-4.29.4.patch`，将副本只读挂回同一位置。QQ 群临时私聊从收消息时就有独立历史，只有 OneBot 标记为好友的普通私信可以使用主人权限。
 - 群聊可配 Group Chat Plus 的 `enable_group_wait_window` 和 `group_wait_window_timeout_ms`。微信使用 WeChat Native 的 `group_reply_mode=probability`、`unique_session=false`，同时关掉 AstrBot 内置概率抢答。LivingMemory 需单独选择 embedding 提供商才能启动自动记忆。DSH 绑定和书架进度可以独立使用。
 
 ## 离线核验

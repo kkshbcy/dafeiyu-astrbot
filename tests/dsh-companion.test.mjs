@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createConnection } from 'node:net';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,7 +38,11 @@ test('one official-protocol connection, isolated durable and auxiliary turns, sc
     const tool=await ask(socket,{...base,tools});assert.deepEqual(tool.call,{id:'tool-1',name:'generate_image',args:{prompt:'云'}});
     const fail=await ask(socket,{...base,recent:[{role:'user',content:'fail'}]});assert.equal(fail.ok,false);
     await app.close();app=await start(options);
-    const reopened=await ask(socket,base);assert.equal(JSON.parse(reopened.text).sid,first.sid);
+    const reopened=JSON.parse((await ask(socket,base)).text);assert.equal(reopened.sid,first.sid);
+    assert(reopened.knowsFirst);
+    await app.close();await unlink(join(dir,'workspace','fixture-persistence.json'));app=await start(options);
+    const rebuilt=JSON.parse((await ask(socket,base)).text);
+    assert.notEqual(rebuilt.sid,first.sid);assert.deepEqual(rebuilt.env.conversation,base.history);assert(rebuilt.knowsFirst);
     const invalid=await ask(socket,{...base,binding:'/tmp/foreign'});assert.equal(invalid.ok,false);
   }finally{await app.close();await rm(dir,{recursive:true,force:true});}
 });

@@ -24,9 +24,14 @@ export class Acp {
           : {error:{code:-32601,message:'unsupported client capability'}};
         this.send({id:packet.id,...reply});
       } else if (this.pending.has(packet.id)) {
-        const {resolve,reject,timer}=this.pending.get(packet.id);
+        const {resolve,reject,timer,method,sessionId}=this.pending.get(packet.id);
         clearTimeout(timer); this.pending.delete(packet.id);
-        if (packet.error) reject(new Error('DSH RPC '+String(packet.error.code)));
+        if (packet.error) {
+          const error=new Error('DSH RPC '+String(packet.error.code));
+          error.sessionMissing=method==='session/resume' && packet.error.code===-32602 &&
+            packet.error.message==='session is not resumable: '+sessionId;
+          reject(error);
+        }
         else resolve(packet.result);
       }
     });
@@ -39,7 +44,7 @@ export class Acp {
     const id=++this.sequence;
     return new Promise((resolve,reject)=>{
       const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error('DSH deadline'));},ms);
-      this.pending.set(id,{resolve,reject,timer});
+      this.pending.set(id,{resolve,reject,timer,method,sessionId:params.sessionId});
       this.send({id,method,params});
     });
   }

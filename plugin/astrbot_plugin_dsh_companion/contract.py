@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import re
+from urllib.parse import unquote
 
 
 PUBLIC = {"generate_image", "query_image_presets", "recall_long_term_memory", "memorize_long_term_memory"}
@@ -12,10 +13,21 @@ MAX_HISTORY_BYTES = 384 * 1024
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 
-def owner_private(scope, sender, allowed):
+def owner_private(scope, sender, allowed, *, wechat_message=None):
     parts = str(scope).split(":", 2)
-    return (len(parts) == 3 and parts[1] == "FriendMessage" and bool(sender)
-            and parts[2] == str(sender) and scope in allowed)
+    if len(parts) != 3 or parts[1] != "FriendMessage" or not sender or scope not in allowed:
+        return False
+    if wechat_message is None:
+        return parts[2] == str(sender)
+    # Native scopes include the bot account and the encoded thread. The trusted
+    # inbound sender is separate from the opaque thread identifier.
+    if not isinstance(wechat_message, dict):
+        return False
+    target = parts[2].split("|")
+    thread = wechat_message.get("threadId")
+    return (len(target) == 3 and bool(target[0]) and target[1] == "private"
+            and isinstance(thread, str) and bool(thread) and not thread.endswith("@chatroom")
+            and unquote(target[2]) == thread and wechat_message.get("senderId") == str(sender))
 
 
 def conversation_key(scope, conversation):

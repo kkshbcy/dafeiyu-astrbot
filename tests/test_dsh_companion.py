@@ -29,6 +29,17 @@ class CompanionContractTest(unittest.TestCase):
         self.assertNotEqual(f("qq:FriendMessage:12", "x"), f("qq:FriendMessage:12", "y"))
         self.assertIsNone(f("qq:FriendMessage:12", None))
 
+    def test_wechat_owner_requires_the_bound_private_account_and_thread(self):
+        scope = "wx:FriendMessage:account-A|private|thread%7Calice"
+        raw = {"threadId":"thread|alice", "senderId":"wxid-alice"}
+        check = self.bridge.owner_private
+        self.assertTrue(check(scope, "wxid-alice", {scope}, wechat_message=raw))
+        self.assertFalse(check(scope, "wxid-alice", set(), wechat_message=raw))
+        self.assertFalse(check(scope.replace("account-A","account-B"),"wxid-alice",{scope},wechat_message=raw))
+        self.assertFalse(check(scope,"wxid-alice",{scope},wechat_message={**raw,"threadId":"other"}))
+        self.assertFalse(check(scope,"wxid-alice",{scope},wechat_message={**raw,"threadId":"x@chatroom"}))
+        self.assertFalse(check(scope,"wxid-other",{scope},wechat_message=raw))
+
     def test_current_state_and_tool_results_are_preserved_without_replaying_every_turn(self):
         history = [
             {"role":"system","content":"今天想安静一点"},

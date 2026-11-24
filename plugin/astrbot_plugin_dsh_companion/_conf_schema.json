@@ -1,7 +1,7 @@
 {
   "owner_private_scopes": {
     "description": "主人私聊的完整会话标识",
-    "hint": "每项为 平台实例ID:FriendMessage:发件人ID。群聊始终只有公开权限。",
+    "hint": "填写 /sid 给出的完整主人私聊 UMO。QQ 为 实例ID:FriendMessage:QQ号，微信为 实例ID:FriendMessage:Native账号|private|编码后的会话ID。",
     "type": "list",
     "default": []
   }

@@ -105,12 +105,17 @@ class Companion(Star):
         self._new_conversation_lock = asyncio.Lock()
 
     def is_owner(self, event):
-        if event.get_platform_name() == "aiocqhttp":
-            raw = getattr(event.message_obj, "raw_message", None)
+        platform = event.get_platform_name()
+        raw = getattr(event.message_obj, "raw_message", None)
+        scopes = self.config.get("owner_private_scopes", [])
+        if platform == "wechat_native":
+            return isinstance(raw, dict) and owner_private(event.unified_msg_origin, event.get_sender_id(),
+                                                            scopes, wechat_message=raw)
+        if platform == "aiocqhttp":
             if not hasattr(raw, "get") or raw.get("post_type") != "message" or raw.get("sub_type") != "friend":
                 return False
-        return owner_private(event.unified_msg_origin, event.get_sender_id(),
-                             self.config.get("owner_private_scopes", []))
+            return owner_private(event.unified_msg_origin, event.get_sender_id(), scopes)
+        return False
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=99999)
     async def accept_once(self, event: AstrMessageEvent):

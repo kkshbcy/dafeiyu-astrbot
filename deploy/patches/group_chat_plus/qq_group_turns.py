@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import math
 import random
 import re
 import time
@@ -88,11 +89,30 @@ def _clip(text, size):
     return text[:size // 2] + "…" + text[-size // 2:]
 
 
-def _obvious_call(texts, names):
-    for text in texts:
-        for name in names:
-            if re.match(r"^@?" + re.escape(name) + r"(?:$|[，,、！!？?：:\s]|在吗|在不在)", text):
-                return True
+def qq_limits(config):
+    def value(key, default, cast):
+        try:
+            number = cast(config.get(key, default))
+            if math.isfinite(number):
+                return number
+        except (TypeError, ValueError, OverflowError):
+            pass
+        return default
+    return (
+        min(1.0, max(0.0, value("qq_ambient_probability", 0.4, float))),
+        max(1, value("qq_reply_window_seconds", 300, int)),
+        max(1, value("qq_reply_limit", 10, int)),
+    )
+
+
+def clear_vocative(text, names):
+    for name in names or ():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        # “小鱼，在吗” addresses her. “小鱼在水里” and “我听说小鱼……” do not.
+        tail = r"(?:[，,、!！?？~～。\s]*$|[，,、：:!！?？\s]*(?:你|您|在吗|在不在|帮我|请问|麻烦你|能不能|可不可以|早安|晚安))"
+        if re.match(r"^@?" + re.escape(name.strip()) + tail, text):
+            return True
     return False
 
 
@@ -120,8 +140,9 @@ async def decide(window, event, history, text, followups, *, direct, names, othe
             rows.append({"speaker": speaker, "text": _clip(getattr(msg, "message_str", ""), 180)})
         body = {"her_names": aliases, "history": rows, "sender": _clip(event.get_sender_name(), 32),
                 "current": current, "followups": additions, "mentions_others": other}
-        addressed = None
-        if provider is not None:
+        obvious = not other and any(clear_vocative(part, aliases) for part in [current, *additions])
+        addressed = True if obvious else None
+        if not obvious and provider is not None:
             async def ask():
                 # Keep room for foreground replies on the shared DSH bridge.
                 async with slots:
@@ -135,11 +156,9 @@ async def decide(window, event, history, text, followups, *, direct, names, othe
                 if label in {"yes", "no"}:
                     addressed = label == "yes"
                 else:
-                    log.warning("[QQ群接话] 收话人判断未返回 yes/no，使用本地称呼判断")
+                    log.warning("[QQ群接话] 收话人判断未返回 yes/no，按普通群聊处理")
             except Exception as exc:
-                log.warning("[QQ群接话] 收话人判断不可用，使用本地称呼判断 (%s)", type(exc).__name__)
-        if addressed is None:
-            addressed = not other and _obvious_call([current, *additions], aliases)
+                log.warning("[QQ群接话] 收话人判断不可用，按普通群聊处理 (%s)", type(exc).__name__)
         if addressed:
             direct = "addressed"
     return window.reserve(room_key(event), direct, probability, seconds, limit)

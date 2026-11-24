@@ -118,8 +118,15 @@ class GroupTurnsTest(unittest.IsolatedAsyncioTestCase):
         _, claim = first.reserve("g", "mention", 0.4, 300, 1)
         reloaded = turns.ReplyWindow.for_context(context)
         self.assertEqual(reloaded.reserve("g", "", 0.4, 300, 1), ("full", None))
+
         first.finish(claim, sent=True)
         self.assertEqual(reloaded.reserve("g", "", 0.4, 300, 1), ("full", None))
+
+    def test_qq_defaults_independent_of_legacy_settings_and_invalid_values(self):
+        self.assertEqual(turns.qq_limits({"initial_probability": 0.3, "enable_reply_density_limit": False}),
+                         (0.4, 300, 10))
+        self.assertEqual(turns.qq_limits({"qq_ambient_probability": "nan", "qq_reply_limit": None,
+                                         "qq_reply_window_seconds": "invalid"}), (0.4, 300, 10))
 
     async def test_mentions_do_not_queue_behind_semantic_checks(self):
         async with self.slots, self.slots:

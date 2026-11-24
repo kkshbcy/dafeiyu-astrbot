@@ -1,0 +1,236 @@
+diff --git a/main.py b/main.py
+index a3e39ce..a07367d 100644
+--- a/main.py
++++ b/main.py
+@@ -14,8 +14,10 @@ from astrbot.api.star import Context, Star
+ from astrbot.core.config.astrbot_config import AstrBotConfig
+ from astrbot.core.star.star_tools import StarTools
+ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
++from data.plugins.astrbot_plugin_dsh_companion.image_sizes import qq_seedream_size
+ from data.plugins.astrbot_plugin_dsh_companion.qq_images import QQImageDelivery, qq_target
+ 
++from .adapter.volcengine_ark_adapter import VolcengineArkAdapter
+ from .core.adapters.generator import ImageGenerator
+ from .core.api.public import ImageGenerationPublicAPI
+ from .core.audit.safety import SafetyAuditor
+@@ -430,6 +432,11 @@ class ImageGenerationPlugin(CommandHandlerMixin, Star):
+             )
+         if sender_id:
+             caller_type = "user"
++        if self._uses_qq_seedream_55(source_event):
++            try:
++                resolution = qq_seedream_size(source_event.get_message_str())
++            except ValueError as exc:
++                raise GenerationTaskCreationError("invalid_size", str(exc)) from exc
+         target = qq_target(source_event) if source_event and auto_send else None
+         quota_date, quota_scopes, quota_exempt = self.usage_manager.reserve_task(
+             task_id,
+@@ -626,7 +633,7 @@ class ImageGenerationPlugin(CommandHandlerMixin, Star):
+ 
+         prompt, gif_requested = split_gif_prompt_option(raw_prompt)
+         image_count, prompt = self._parse_command_image_count(prompt)
+-        options = parse_generation_options(prompt)
++        options = parse_generation_options(prompt, allow_pixel_size=self._uses_qq_seedream_55(event))
+         if options.error:
+             yield event.plain_result(f"❌ {options.error}")
+             return
+@@ -723,7 +730,7 @@ class ImageGenerationPlugin(CommandHandlerMixin, Star):
+ 
+             reference_image_count = len(images_data or [])
+ 
+-            self.create_generation_task(
++            record = self.create_generation_task(
+                 task_id=task_id,
+                 source="指令",
+                 prompt=prompt,
+@@ -761,13 +768,22 @@ class ImageGenerationPlugin(CommandHandlerMixin, Star):
+             preset_label=preset_label,
+             presets=matched_presets,
+             personas=matched_personas,
+-            aspect_ratio=aspect_ratio,
+-            resolution=resolution,
++            aspect_ratio=record.aspect_ratio,
++            resolution=record.resolution,
+             task_id=task_id,
+         )
+         if msg:
+             yield event.plain_result(msg)
+ 
++    def _uses_qq_seedream_55(self, event: AstrMessageEvent | None) -> bool:
++        adapter = self.generator.adapter if self.generator else None
++        return (
++            event is not None
++            and event.get_platform_name() == "aiocqhttp"
++            and isinstance(adapter, VolcengineArkAdapter)
++            and adapter.is_seedream_55()
++        )
++
+     @filter.command("生图模型")
+     async def model_command(self, event: AstrMessageEvent, model_index: str = ""):
+         """Switch the active image generation model."""
+diff --git a/adapter/volcengine_ark_adapter.py b/adapter/volcengine_ark_adapter.py
+index 850693c..85ac8ef 100644
+--- a/adapter/volcengine_ark_adapter.py
++++ b/adapter/volcengine_ark_adapter.py
+@@ -5,6 +5,7 @@ import time
+ from typing import Any, ClassVar
+ 
+ from astrbot.api import logger
++from data.plugins.astrbot_plugin_dsh_companion.image_sizes import seedream_pixels
+ 
+ from ..core.adapters.base import BaseImageAdapter
+ from ..core.shared.constants import UNSPECIFIED_OPTION, VOLCENGINE_ARK_DEFAULT_BASE_URL
+@@ -63,7 +64,10 @@ class VolcengineArkAdapter(BaseImageAdapter):
+ 
+     def get_capabilities(self) -> ImageCapability:
+         """Return adapter capabilities."""
+-        return self._get_configured_capabilities()
++        capabilities = self._get_configured_capabilities()
++        if self.is_seedream_55():
++            capabilities |= ImageCapability.ASPECT_RATIO | ImageCapability.RESOLUTION
++        return capabilities
+ 
+     async def _generate_once(
+         self, request: GenerationRequest
+@@ -80,6 +84,8 @@ class VolcengineArkAdapter(BaseImageAdapter):
+         url = self._endpoint_url()
+ 
+         self._log_request_overview(request, url, payload=payload)
++        if self.is_seedream_55():
++            logger.info(f"{self._get_log_prefix(request.task_id)} Seedream 输出尺寸={payload['size']}")
+         self._log_debug_json("请求", payload, request.task_id)
+ 
+         try:
+@@ -166,6 +172,9 @@ class VolcengineArkAdapter(BaseImageAdapter):
+         model = self._model_name_lower()
+         return "seedream-5-0-pro" in model or "seedream-5.0-pro" in model
+ 
++    def is_seedream_55(self) -> bool:
++        return self._model_name_lower().startswith("doubao-seedream-5-5")
++
+     def _resolve_size(self, request: GenerationRequest) -> str | None:
+         """Resolve the Ark size parameter from resolution and aspect ratio.
+ 
+@@ -173,6 +182,12 @@ class VolcengineArkAdapter(BaseImageAdapter):
+         ``widthxheight`` pixels. When only resolution is set, send the tier.
+         When both resolution and aspect ratio are set, send mapped pixels.
+         """
++        if self.is_seedream_55():
++            if pixels := seedream_pixels(request.resolution):
++                return pixels
++            size_map = self.SIZE_MAPS.get(request.resolution, self.SIZE_MAPS["1K"])
++            return size_map.get(request.aspect_ratio, size_map["1:1"])
++
+         resolution_unspecified = (
+             not request.resolution or request.resolution == UNSPECIFIED_OPTION
+         )
+diff --git a/core/generation/executor.py b/core/generation/executor.py
+index 679ec22..1c4aeb2 100644
+--- a/core/generation/executor.py
++++ b/core/generation/executor.py
+@@ -6,7 +6,9 @@ import time
+ from astrbot.api import logger
+ from astrbot.api.event import MessageChain
+ from astrbot.api.star import Context
++from data.plugins.astrbot_plugin_dsh_companion.image_sizes import seedream_pixels
+ 
++from ...adapter.volcengine_ark_adapter import VolcengineArkAdapter
+ from ..adapters.generator import ImageGenerator
+ from ..audit.safety import SafetyAuditor
+ from ..config.manager import ConfigManager
+@@ -154,6 +156,10 @@ class GenerationExecutor:
+         if final_ar == UNSPECIFIED_OPTION:
+             final_ar = None
+         final_res = validate_resolution(resolution)
++        if final_res is None:
++            adapter = self.generator.adapter
++            if isinstance(adapter, VolcengineArkAdapter) and adapter.is_seedream_55():
++                final_res = seedream_pixels(resolution)
+         if final_res == UNSPECIFIED_OPTION:
+             final_res = None
+ 
+diff --git a/core/generation/options.py b/core/generation/options.py
+index a6e3bac..4fa8dcf 100644
+--- a/core/generation/options.py
++++ b/core/generation/options.py
+@@ -3,8 +3,11 @@
+ from __future__ import annotations
+ 
+ import re
++import unicodedata
+ from typing import Any, NamedTuple
+ 
++from data.plugins.astrbot_plugin_dsh_companion.image_sizes import seedream_pixels
++
+ from ..shared.constants import (
+     SUPPORTED_ASPECT_RATIOS,
+     SUPPORTED_RESOLUTIONS,
+@@ -25,7 +28,7 @@ _AFTER_KEY_PARTICLES = set("为是")
+ # Prefer complete numeric expressions (including internal whitespace), but also
+ # capture invalid explicit values so they cannot silently fall back to defaults.
+ _VALUE = (
+-    r"(?:\d+\s*[:：]\s*\d+|\d+(?:\.\d+)?\s*[kK])"
++    r"(?:\d+\s*[:：]\s*\d+|\d+(?:\.\d+)?\s*[kK]|\d+\s*[xX×*]\s*\d+)"
+     r"(?![A-Za-z0-9_.:：])|[^\s，,。；;！？!?、=：:]+"
+ )
+ _REVERSE = re.compile(
+@@ -110,6 +113,8 @@ def split_trailing_count_token(prompt: str) -> tuple[str, str | None]:
+     last = tokens[-1]
+     if not last.isdecimal():
+         return raw_prompt, None
++    if re.search(r"\d\s*[xX×*]\s*\d+\s*$", raw_prompt):
++        return raw_prompt, None
+     # A spaced ratio ("16 : 9") ends in a number, but is not a count.
+     if len(tokens) > 1 and tokens[-2].endswith((":", "：")):
+         return raw_prompt, None
+@@ -135,7 +140,7 @@ def is_explicit_size(value: Any) -> bool:
+     return bool(text) and text != UNSPECIFIED_OPTION
+ 
+ 
+-def parse_generation_options(prompt: str) -> GenerationOptions:
++def parse_generation_options(prompt: str, *, allow_pixel_size: bool = False) -> GenerationOptions:
+     """Return cleaned text and validated overrides; leave unmarked prose alone.
+ 
+     The command's trailing image count must be removed by the caller first.
+@@ -193,11 +198,16 @@ def parse_generation_options(prompt: str) -> GenerationOptions:
+             gif_requested = True
+             continue
+         value = re.sub(r"\s+", "", raw).replace("：", ":").upper()
++        pixels = seedream_pixels(unicodedata.normalize("NFKC", raw).lower()) if (
++            key == "resolution" and allow_pixel_size
++        ) else None
++        if allow_pixel_size:
++            value = pixels or unicodedata.normalize("NFKC", value)
+         supported = (
+             SUPPORTED_RESOLUTIONS if key == "resolution" else SUPPORTED_ASPECT_RATIOS
+         )
+         label = "分辨率" if key == "resolution" else "宽高比"
+-        if value not in supported:
++        if value not in supported and pixels is None:
+             return GenerationOptions(
+                 prompt,
+                 error=f"{label}参数无效：{raw or '未填写'}。支持的值：{'、'.join(supported)}",
+diff --git a/core/llm/tools.py b/core/llm/tools.py
+index 79bf47f..68d8f8a 100644
+--- a/core/llm/tools.py
++++ b/core/llm/tools.py
+@@ -181,7 +181,7 @@ async def _start_generation_task(
+ 
+         reference_image_count = len(images_data)
+ 
+-        plugin.create_generation_task(
++        record = plugin.create_generation_task(
+             task_id=task_id,
+             source="LLM工具",
+             prompt=prompt,
+@@ -216,8 +216,8 @@ async def _start_generation_task(
+         preset_label=preset_label,
+         presets=presets,
+         personas=personas,
+-        aspect_ratio=aspect_ratio,
+-        resolution=resolution,
++        aspect_ratio=record.aspect_ratio,
++        resolution=record.resolution,
+         image_count=image_count,
+         task_id=task_id,
+         direct_qq=qq_target(event) is not None,
